@@ -1,98 +1,34 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { useToolEnabled } from "@/lib/tool";
 
-type InstrumentSpec = {
-  symbol: string;
-  tick_size: number;
-  tick_value: number;   // EUR per tick @ 1 lot
-  min_lot: number;
-  lot_step: number;
-  max_lot?: number | null;
-};
+type InstrumentSpec = { symbol: string; tick_size: number; tick_value: number; min_lot: number; lot_step: number; max_lot?: number | null; };
+type MasterInfo = { balance: number; equity: number; };
+type MasterOrder = { symbol: string; side: "buy" | "sell"; lot: number; sl?: number | null; tp?: number | null; comment?: string | null; };
 
-type MasterInfo = {
-  balance: number;
-  equity: number;
-};
-
-type MasterOrder = {
-  symbol: string;
-  side: "buy" | "sell";
-  lot: number;
-  sl?: number | null;
-  tp?: number | null;
-  comment?: string | null;
-};
-
-type ProportionalRule = {
-  type: "proportional";
-  base: "balance" | "equity";
-  multiplier: number;
-};
-
-type FixedRule = {
-  type: "fixed";
-  lots: number;
-};
-
-type LotPerUnitRule = {
-  type: "lot_per_10k";
-  base: "balance" | "equity";
-  lots_per_unit: number;
-  unit: number; // es. 10000
-};
-
+type ProportionalRule = { type: "proportional"; base: "balance" | "equity"; multiplier: number; };
+type FixedRule = { type: "fixed"; lots: number; };
+type LotPerUnitRule = { type: "lot_per_10k"; base: "balance" | "equity"; lots_per_unit: number; unit: number; };
 type Rule = ProportionalRule | FixedRule | LotPerUnitRule;
 
-type FollowerAccount = {
-  id: string;
-  name?: string | null;
-  balance: number;
-  equity: number;
-  rule: Rule;
-  enabled: boolean;
-};
+type FollowerAccount = { id: string; name?: string | null; balance: number; equity: number; rule: Rule; enabled: boolean; };
 
-type CopyPreviewRequest = {
-  instrument: InstrumentSpec;
-  master_info: MasterInfo;
-  master_order: MasterOrder;
-  followers: FollowerAccount[];
-};
-
-type FollowerPreview = {
-  follower_id: string;
-  follower_name?: string | null;
-  raw_lot: number;
-  rounded_lot: number;
-  warnings: string[];
-};
-
-type CopyPreviewResponse = {
-  symbol: string;
-  side: "buy" | "sell";
-  master_lot: number;
-  total_followers: number;
-  total_lots_raw: number;
-  total_lots_rounded: number;
-  previews: FollowerPreview[];
-};
+type CopyPreviewRequest = { instrument: InstrumentSpec; master_info: MasterInfo; master_order: MasterOrder; followers: FollowerAccount[]; };
+type FollowerPreview = { follower_id: string; follower_name?: string | null; raw_lot: number; rounded_lot: number; warnings: string[]; };
+type CopyPreviewResponse = { symbol: string; side: "buy" | "sell"; master_lot: number; total_followers: number; total_lots_raw: number; total_lots_rounded: number; previews: FollowerPreview[]; };
 
 export default function OrdersPage() {
+  const { enabled } = useToolEnabled();
+
   // Instrument
   const [instrument, setInstrument] = useState<InstrumentSpec>({
-    symbol: "EURUSD",
-    tick_size: 0.0001,
-    tick_value: 10,
-    min_lot: 0.01,
-    lot_step: 0.01,
-    max_lot: 50,
+    symbol: "EURUSD", tick_size: 0.0001, tick_value: 10, min_lot: 0.01, lot_step: 0.01, max_lot: 50,
   });
 
   // Master info & order
@@ -103,32 +39,24 @@ export default function OrdersPage() {
   const [tp, setTp] = useState<number | "">("");
   const [comment, setComment] = useState<string>("");
 
+  // Precompila da Output AI selezionato
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("vtp_parsed_order");
+      if (!raw) return;
+      const p = JSON.parse(raw);
+      if (p?.symbol) setInstrument((prev) => ({ ...prev, symbol: p.symbol }));
+      if (p?.side === "buy" || p?.side === "sell") setSide(p.side);
+      if (typeof p?.sl === "number") setSl(p.sl);
+      if (typeof p?.tp1 === "number") setTp(p.tp1);
+    } catch {}
+  }, []);
+
   // Followers editor (JSON semplice)
   const defaultFollowersJSON = `[
-  {
-    "id": "acc-001",
-    "name": "Follower A",
-    "balance": 10000,
-    "equity": 10000,
-    "enabled": true,
-    "rule": { "type": "proportional", "base": "equity", "multiplier": 1.0 }
-  },
-  {
-    "id": "acc-002",
-    "name": "Follower B",
-    "balance": 20000,
-    "equity": 20000,
-    "enabled": true,
-    "rule": { "type": "proportional", "base": "equity", "multiplier": 1.0 }
-  },
-  {
-    "id": "acc-003",
-    "name": "Fixed 0.10",
-    "balance": 5000,
-    "equity": 5000,
-    "enabled": true,
-    "rule": { "type": "fixed", "lots": 0.10 }
-  }
+  {"id":"acc-001","name":"Follower A","balance":10000,"equity":10000,"enabled":true,"rule":{"type":"proportional","base":"equity","multiplier":1.0}},
+  {"id":"acc-002","name":"Follower B","balance":20000,"equity":20000,"enabled":true,"rule":{"type":"proportional","base":"equity","multiplier":1.0}},
+  {"id":"acc-003","name":"Fixed 0.10","balance":5000,"equity":5000,"enabled":true,"rule":{"type":"fixed","lots":0.10}}
 ]`;
   const [followersJSON, setFollowersJSON] = useState<string>(defaultFollowersJSON);
   const [followers, setFollowers] = useState<FollowerAccount[]>([]);
@@ -158,7 +86,7 @@ export default function OrdersPage() {
     setJsonError("");
     setApiError("");
 
-    // se non hai ancora premuto "Carica JSON", prova a parse al volo
+    // se non hai caricato prima
     let f: FollowerAccount[] = followers;
     if (f.length === 0) {
       try {
@@ -185,7 +113,7 @@ export default function OrdersPage() {
       followers: f,
     };
 
-    // timeout 10s per evitare "preview load..." infinito
+    // timeout 10s
     const ctrl = new AbortController();
     const id = setTimeout(() => ctrl.abort(), 10_000);
 
@@ -218,70 +146,23 @@ export default function OrdersPage() {
     <div className="p-6 max-w-7xl mx-auto space-y-6">
       {/* Instrument & Master */}
       <Card>
-        <CardHeader>
-          <CardTitle>Instrument & Master</CardTitle>
-        </CardHeader>
+        <CardHeader><CardTitle>Instrument & Master</CardTitle></CardHeader>
         <CardContent className="grid gap-6 md:grid-cols-3">
           {/* Colonna 1: Instrument */}
           <div className="space-y-3">
             <h3 className="text-lg font-semibold">Instrument</h3>
             <div className="space-y-2">
               <Label>Symbol</Label>
-              <Input
-                value={instrument.symbol}
-                onChange={(e) => setInstrument({ ...instrument, symbol: e.target.value })}
-              />
+              <Input value={instrument.symbol} onChange={(e) => setInstrument({ ...instrument, symbol: e.target.value.toUpperCase() })} />
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label>Tick Size</Label>
-                <Input
-                  type="number"
-                  step="0.00001"
-                  value={instrument.tick_size}
-                  onChange={(e) => setInstrument({ ...instrument, tick_size: Number(e.target.value) })}
-                />
-              </div>
-              <div>
-                <Label>Tick Value (€)</Label>
-                <Input
-                  type="number"
-                  step="0.01"
-                  value={instrument.tick_value}
-                  onChange={(e) => setInstrument({ ...instrument, tick_value: Number(e.target.value) })}
-                />
-              </div>
+              <div><Label>Tick Size</Label><Input type="number" step="0.00001" value={instrument.tick_size} onChange={(e) => setInstrument({ ...instrument, tick_size: Number(e.target.value) })} /></div>
+              <div><Label>Tick Value (€)</Label><Input type="number" step="0.01" value={instrument.tick_value} onChange={(e) => setInstrument({ ...instrument, tick_value: Number(e.target.value) })} /></div>
             </div>
             <div className="grid grid-cols-3 gap-3">
-              <div>
-                <Label>Min Lot</Label>
-                <Input
-                  type="number"
-                  step="0.01"
-                  value={instrument.min_lot}
-                  onChange={(e) => setInstrument({ ...instrument, min_lot: Number(e.target.value) })}
-                />
-              </div>
-              <div>
-                <Label>Lot Step</Label>
-                <Input
-                  type="number"
-                  step="0.01"
-                  value={instrument.lot_step}
-                  onChange={(e) => setInstrument({ ...instrument, lot_step: Number(e.target.value) })}
-                />
-              </div>
-              <div>
-                <Label>Max Lot</Label>
-                <Input
-                  type="number"
-                  step="0.01"
-                  value={instrument.max_lot ?? 0}
-                  onChange={(e) =>
-                    setInstrument({ ...instrument, max_lot: Number(e.target.value) || undefined })
-                  }
-                />
-              </div>
+              <div><Label>Min Lot</Label><Input type="number" step="0.01" value={instrument.min_lot} onChange={(e) => setInstrument({ ...instrument, min_lot: Number(e.target.value) })} /></div>
+              <div><Label>Lot Step</Label><Input type="number" step="0.01" value={instrument.lot_step} onChange={(e) => setInstrument({ ...instrument, lot_step: Number(e.target.value) })} /></div>
+              <div><Label>Max Lot</Label><Input type="number" step="0.01" value={instrument.max_lot ?? 0} onChange={(e) => setInstrument({ ...instrument, max_lot: Number(e.target.value) || undefined })} /></div>
             </div>
           </div>
 
@@ -289,102 +170,41 @@ export default function OrdersPage() {
           <div className="space-y-3">
             <h3 className="text-lg font-semibold">Master Info</h3>
             <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label>Balance (€)</Label>
-                <Input
-                  type="number"
-                  step="0.01"
-                  value={masterInfo.balance}
-                  onChange={(e) => setMasterInfo({ ...masterInfo, balance: Number(e.target.value) })}
-                />
-              </div>
-              <div>
-                <Label>Equity (€)</Label>
-                <Input
-                  type="number"
-                  step="0.01"
-                  value={masterInfo.equity}
-                  onChange={(e) => setMasterInfo({ ...masterInfo, equity: Number(e.target.value) })}
-                />
-              </div>
+              <div><Label>Balance (€)</Label><Input type="number" step="0.01" value={masterInfo.balance} onChange={(e) => setMasterInfo({ ...masterInfo, balance: Number(e.target.value) })} /></div>
+              <div><Label>Equity (€)</Label><Input type="number" step="0.01" value={masterInfo.equity} onChange={(e) => setMasterInfo({ ...masterInfo, equity: Number(e.target.value) })} /></div>
             </div>
 
             <h3 className="text-lg font-semibold pt-2">Master Order</h3>
             <div className="space-y-2">
               <Label>Side</Label>
-              <RadioGroup
-                value={side}
-                onValueChange={(v: any) => setSide(v)}
-                className="flex gap-6"
-              >
-                <div className="flex items-center space-x-2">
-                  <RadioGroupItem id="buy" value="buy" />
-                  <Label htmlFor="buy">Buy</Label>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <RadioGroupItem id="sell" value="sell" />
-                  <Label htmlFor="sell">Sell</Label>
-                </div>
+              <RadioGroup value={side} onValueChange={(v: any) => setSide(v)} className="flex gap-6">
+                <div className="flex items-center space-x-2"><RadioGroupItem id="buy" value="buy" /><Label htmlFor="buy">Buy</Label></div>
+                <div className="flex items-center space-x-2"><RadioGroupItem id="sell" value="sell" /><Label htmlFor="sell">Sell</Label></div>
               </RadioGroup>
             </div>
             <div className="grid grid-cols-3 gap-3">
-              <div>
-                <Label>Lot</Label>
-                <Input
-                  type="number"
-                  step="0.01"
-                  value={masterLot}
-                  onChange={(e) => setMasterLot(Number(e.target.value))}
-                />
-              </div>
-              <div>
-                <Label>SL (price)</Label>
-                <Input
-                  type="number"
-                  step="0.00001"
-                  value={sl}
-                  onChange={(e) => setSl(e.target.value === "" ? "" : Number(e.target.value))}
-                />
-              </div>
-              <div>
-                <Label>TP (price)</Label>
-                <Input
-                  type="number"
-                  step="0.00001"
-                  value={tp}
-                  onChange={(e) => setTp(e.target.value === "" ? "" : Number(e.target.value))}
-                />
-              </div>
+              <div><Label>Lot</Label><Input type="number" step="0.01" value={masterLot} onChange={(e) => setMasterLot(Number(e.target.value))} /></div>
+              <div><Label>SL (price)</Label><Input type="number" step="0.00001" value={sl} onChange={(e) => setSl(e.target.value === "" ? "" : Number(e.target.value))} /></div>
+              <div><Label>TP (price)</Label><Input type="number" step="0.00001" value={tp} onChange={(e) => setTp(e.target.value === "" ? "" : Number(e.target.value))} /></div>
             </div>
             <div className="space-y-2">
               <Label>Comment</Label>
-              <input
-                className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                value={comment}
-                onChange={(e) => setComment(e.target.value)}
-                placeholder="(opzionale)"
-              />
+              <input className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm" value={comment} onChange={(e) => setComment(e.target.value)} placeholder="(opzionale)" />
             </div>
           </div>
 
           {/* Colonna 3: Followers JSON */}
           <div className="space-y-3">
             <h3 className="text-lg font-semibold">Followers (JSON)</h3>
-            <textarea
-              className="w-full h-72 rounded-md border border-border bg-background px-3 py-2 text-sm font-mono"
-              value={followersJSON}
-              onChange={(e) => setFollowersJSON(e.target.value)}
-            />
+            <textarea className="w-full h-72 rounded-md border border-border bg-background px-3 py-2 text-sm font-mono" value={followersJSON} onChange={(e) => setFollowersJSON(e.target.value)} />
             {jsonError && <div className="text-red-400 text-sm">{jsonError}</div>}
             {apiError && <div className="text-red-400 text-sm">• {apiError}</div>}
             <div className="flex gap-3">
               <Button variant="secondary" onClick={parseFollowersJSON}>Carica JSON</Button>
-              <Button onClick={handlePreview} disabled={loading}>
-                {loading ? "Preview..." : "Preview Copy"}
-              </Button>
+              <Button onClick={handlePreview} disabled={loading || !enabled}>{loading ? "Preview..." : "Preview Copy"}</Button>
             </div>
             <div className="text-xs opacity-70">
-              API: <code>{apiBase}</code> — Se resta su "Preview..." controlla la porta in <code>.env.local</code>.
+              API: <code>{apiBase}</code> — Tool: <b>{enabled ? "ON" : "OFF"}</b>. Se resta su "Preview...", controlla la porta in <code>.env.local</code>.
             </div>
           </div>
         </CardContent>
@@ -393,9 +213,7 @@ export default function OrdersPage() {
       {/* Risultato Preview */}
       {result && (
         <Card className="border-primary/40">
-          <CardHeader>
-            <CardTitle>Recap — {result.symbol} {result.side.toUpperCase()} (master {result.master_lot} lot)</CardTitle>
-          </CardHeader>
+          <CardHeader><CardTitle>Recap — {result.symbol} {result.side.toUpperCase()} (master {result.master_lot} lot)</CardTitle></CardHeader>
           <CardContent className="space-y-4">
             <div className="text-sm opacity-80">
               Followers: <b>{result.total_followers}</b> — Total lots (raw): <b>{result.total_lots_raw.toFixed(4)}</b> — Total lots (rounded): <b>{result.total_lots_rounded.toFixed(2)}</b>
@@ -420,9 +238,7 @@ export default function OrdersPage() {
                       <td className="py-2 pr-4 font-semibold">{p.rounded_lot.toFixed(2)}</td>
                       <td className="py-2 pr-4">
                         {p.warnings.length > 0 ? (
-                          <ul className="list-disc pl-5">
-                            {p.warnings.map((w, i) => <li key={i}>{w}</li>)}
-                          </ul>
+                          <ul className="list-disc pl-5">{p.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
                         ) : "—"}
                       </td>
                     </tr>
