@@ -103,7 +103,7 @@ export default function OrdersPage() {
   const [tp, setTp] = useState<number | "">("");
   const [comment, setComment] = useState<string>("");
 
-  // Followers editor (JSON semplice per MVP)
+  // Followers editor (JSON semplice)
   const defaultFollowersJSON = `[
   {
     "id": "acc-001",
@@ -137,6 +137,7 @@ export default function OrdersPage() {
   // Preview result
   const [result, setResult] = useState<CopyPreviewResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [apiError, setApiError] = useState<string>("");
 
   const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
 
@@ -155,12 +156,14 @@ export default function OrdersPage() {
     setLoading(true);
     setResult(null);
     setJsonError("");
+    setApiError("");
 
     // se non hai ancora premuto "Carica JSON", prova a parse al volo
-    if (followers.length === 0) {
+    let f: FollowerAccount[] = followers;
+    if (f.length === 0) {
       try {
         const parsed = JSON.parse(followersJSON);
-        if (Array.isArray(parsed)) setFollowers(parsed);
+        if (Array.isArray(parsed)) f = parsed;
       } catch {
         setJsonError("Followers JSON non valido");
         setLoading(false);
@@ -179,28 +182,41 @@ export default function OrdersPage() {
         tp: tp === "" ? undefined : Number(tp),
         comment: comment || undefined,
       },
-      followers: followers.length > 0 ? followers : JSON.parse(followersJSON),
+      followers: f,
     };
 
-    const res = await fetch(`${apiBase}/copy/preview`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      setJsonError(`Errore API: ${res.status} ${text}`);
+    // timeout 10s per evitare "preview load..." infinito
+    const ctrl = new AbortController();
+    const id = setTimeout(() => ctrl.abort(), 10_000);
+
+    try {
+      const res = await fetch(`${apiBase}/copy/preview`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: ctrl.signal,
+      });
+      clearTimeout(id);
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        setApiError(`Errore API: ${res.status}${text ? " — " + text : ""}`);
+        setLoading(false);
+        return;
+      }
+
+      const data = (await res.json()) as CopyPreviewResponse;
+      setResult(data);
+    } catch (e: any) {
+      setApiError(e?.name === "AbortError" ? "Timeout: API non risponde (controlla porta in .env.local)" : (e?.message ?? "Errore di rete"));
+    } finally {
       setLoading(false);
-      return;
     }
-    const data = (await res.json()) as CopyPreviewResponse;
-    setResult(data);
-    setLoading(false);
   }
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
-      {/* Instrument */}
+      {/* Instrument & Master */}
       <Card>
         <CardHeader>
           <CardTitle>Instrument & Master</CardTitle>
@@ -269,7 +285,7 @@ export default function OrdersPage() {
             </div>
           </div>
 
-          {/* Colonna 2: Master info */}
+          {/* Colonna 2: Master info + order */}
           <div className="space-y-3">
             <h3 className="text-lg font-semibold">Master Info</h3>
             <div className="grid grid-cols-2 gap-3">
@@ -360,11 +376,15 @@ export default function OrdersPage() {
               onChange={(e) => setFollowersJSON(e.target.value)}
             />
             {jsonError && <div className="text-red-400 text-sm">{jsonError}</div>}
+            {apiError && <div className="text-red-400 text-sm">• {apiError}</div>}
             <div className="flex gap-3">
               <Button variant="secondary" onClick={parseFollowersJSON}>Carica JSON</Button>
               <Button onClick={handlePreview} disabled={loading}>
                 {loading ? "Preview..." : "Preview Copy"}
               </Button>
+            </div>
+            <div className="text-xs opacity-70">
+              API: <code>{apiBase}</code> — Se resta su "Preview..." controlla la porta in <code>.env.local</code>.
             </div>
           </div>
         </CardContent>
