@@ -4,17 +4,19 @@ import { useEffect, useState } from "react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import Link from "next/link";
+import { useToolEnabled } from "@/lib/tool";
 
 export default function LiveSessionPage() {
+  const { enabled, setEnabled } = useToolEnabled();
   const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
 
-  // Safety Guard: ON = blocca esecuzioni reali (rimane solo DRY RUN)
+  // Safety Guard: ON = blocca esecuzioni reali (solo DRY RUN)
   const [safetyGuard, setSafetyGuard] = useState<boolean>(true);
   const [apiOk, setApiOk] = useState<null | boolean>(null);
   const [pingMsg, setPingMsg] = useState<string>("");
 
   useEffect(() => {
-    // ping API per status
     (async () => {
       try {
         const res = await fetch(`${apiBase}/health`);
@@ -28,18 +30,12 @@ export default function LiveSessionPage() {
     })();
   }, [apiBase]);
 
-  function toggleSafety() {
-    setSafetyGuard((s) => !s);
-  }
-
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
       <Card>
-        <CardHeader>
-          <CardTitle>Live Session — Control Room</CardTitle>
-        </CardHeader>
+        <CardHeader><CardTitle>Live Session — Control Room</CardTitle></CardHeader>
         <CardContent className="grid gap-6 md:grid-cols-3">
-          {/* Colonna 1: Stato API + Guard */}
+          {/* Colonna 1: Stato API + Toggle Tool */}
           <div className="space-y-4">
             <div className="text-sm">
               <div className="opacity-80">API base:</div>
@@ -50,14 +46,24 @@ export default function LiveSessionPage() {
             </div>
 
             <div className="space-y-2">
+              <Label className="text-base">Tool</Label>
+              <div className="text-sm opacity-80">Stato globale: <b>{enabled ? "ON" : "OFF"}</b></div>
+              <div className="flex gap-3">
+                <Button variant={enabled ? "secondary" : "default"} onClick={() => setEnabled(!enabled)}>
+                  {enabled ? "Turn OFF" : "Turn ON"}
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
               <Label className="text-base">Safety Guard</Label>
               <div className="text-sm opacity-80">
                 {safetyGuard
                   ? "ON — nessuna esecuzione reale (solo DRY RUN / preview)"
-                  : "OFF — attenzione: esecuzioni reali abilitate (quando il bridge sarà collegato)"}
+                  : "OFF — attenzione: esecuzioni reali abilitate (quando collegheremo MT4)"}
               </div>
               <div className="flex gap-3">
-                <Button variant={safetyGuard ? "default" : "secondary"} onClick={toggleSafety}>
+                <Button variant={safetyGuard ? "default" : "secondary"} onClick={() => setSafetyGuard((s) => !s)}>
                   {safetyGuard ? "Disable Guard" : "Enable Guard"}
                 </Button>
               </div>
@@ -72,7 +78,7 @@ export default function LiveSessionPage() {
               <Button variant="secondary" disabled>Execute Copy (coming soon)</Button>
             </div>
             <div className="text-xs opacity-70">
-              In questa sezione collegheremo l’endpoint <code>/copy/execute</code>. Con Safety Guard ON, resterà in DRY RUN.
+              Collegheremo l’endpoint <code>/copy/execute</code>. Con Safety Guard ON resterà in DRY RUN.
             </div>
           </div>
 
@@ -80,20 +86,18 @@ export default function LiveSessionPage() {
           <div className="space-y-2">
             <Label className="text-base">Shortcuts</Label>
             <div className="flex flex-col gap-2">
-              <a className="underline opacity-90 hover:opacity-100" href="/output-ai">Apri Output AI</a>
-              <a className="underline opacity-90 hover:opacity-100" href="/orders">Vai a Orders (Preview)</a>
-              <a className="underline opacity-90 hover:opacity-100" href="/sizing-calculator">Apri Calculator</a>
+              <Link className="underline opacity-90 hover:opacity-100" href="/output-ai">Apri Output AI</Link>
+              <Link className="underline opacity-90 hover:opacity-100" href="/orders">Vai a Orders (Preview)</Link>
+              <Link className="underline opacity-90 hover:opacity-100" href="/sizing-calculator">Apri Calculator</Link>
             </div>
           </div>
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader>
-          <CardTitle>Activity Feed (coming soon)</CardTitle>
-        </CardHeader>
+        <CardHeader><CardTitle>Activity Feed (coming soon)</CardTitle></CardHeader>
         <CardContent className="text-sm opacity-80">
-          Qui vedrai: richieste di preview, esiti (OK/ERR), tempi di risposta, e—quando abiliteremo il bridge—gli ID degli ordini, slippage, esecuzioni per account.
+          Qui vedrai: richieste di preview, esiti (OK/ERR), tempi di risposta e—quando abiliteremo il bridge—ID ordini, slippage, esecuzioni per account.
         </CardContent>
       </Card>
     </div>
