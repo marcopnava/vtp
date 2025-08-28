@@ -1,180 +1,152 @@
 # /Users/marconava/Desktop/vtp/apps/api/vtp_api/routers.py
-
-from typing import List, Optional, Literal, Annotated, Union
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
 import math
-
-# ---------------------------
-# Helpers
-# ---------------------------
-def _round_down_to_step(value: float, step: float) -> float:
-    if step <= 0:
-        return value
-    steps = math.floor(value / step)
-    return round(steps * step, 8)
-
-def _apply_lot_bounds_and_round(raw_lots: float, min_lot: float, lot_step: float, max_lot: Optional[float]) -> (float, float, list):
-    warnings = []
-    lots = raw_lots
-
-    if max_lot is not None and lots > max_lot:
-        warnings.append(f"Cap applicato: max_lot={max_lot}")
-        lots = max_lot
-
-    if lots < min_lot:
-        warnings.append(f"Aumentato a min_lot={min_lot}")
-        lots = min_lot
-
-    rounded = _round_down_to_step(lots, lot_step)
-
-    if rounded < min_lot:
-        rounded = round(math.ceil(min_lot / lot_step) * lot_step, 8)
-        warnings.append("Allineato allo step sopra min_lot")
-
-    return lots, rounded, warnings
-
-# ---------------------------
-# Schemi Pydantic (richiesta/risposta)
-# ---------------------------
-
-class InstrumentSpec(BaseModel):
-    symbol: str
-    tick_size: float = Field(..., gt=0)
-    tick_value: float = Field(..., gt=0)  # EUR per tick @ 1 lot
-    min_lot: float = Field(0.01, gt=0)
-    lot_step: float = Field(0.01, gt=0)
-    max_lot: Optional[float] = None
-
-class MasterInfo(BaseModel):
-    balance: float = Field(..., gt=0)
-    equity: float = Field(..., gt=0)
-
-class MasterOrder(BaseModel):
-    symbol: str
-    side: Literal["buy", "sell"]
-    lot: float = Field(..., gt=0)
-    sl: Optional[float] = None
-    tp: Optional[float] = None
-    comment: Optional[str] = None
-
-class ProportionalRule(BaseModel):
-    type: Literal["proportional"] = "proportional"
-    base: Literal["balance", "equity"] = "equity"
-    multiplier: float = Field(1.0, gt=0)
-
-class FixedRule(BaseModel):
-    type: Literal["fixed"] = "fixed"
-    lots: float = Field(..., gt=0)
-
-class LotPerUnitRule(BaseModel):
-    type: Literal["lot_per_10k"] = "lot_per_10k"
-    base: Literal["balance", "equity"] = "equity"
-    lots_per_unit: float = Field(..., gt=0, description="lotti per unità (es. per 10k)")
-    unit: float = Field(10000.0, gt=0, description="unità di base, es. 10000 EUR")
-
-Rule = Annotated[Union[ProportionalRule, FixedRule, LotPerUnitRule], Field(discriminator="type")]
-
-class FollowerAccount(BaseModel):
-    id: str
-    name: Optional[str] = None
-    balance: float = Field(..., gt=0)
-    equity: float = Field(..., gt=0)
-    rule: Rule
-    enabled: bool = True
-
-class CopyPreviewRequest(BaseModel):
-    instrument: InstrumentSpec
-    master_info: MasterInfo
-    master_order: MasterOrder
-    followers: List[FollowerAccount]
-
-class FollowerPreview(BaseModel):
-    follower_id: str
-    follower_name: Optional[str] = None
-    raw_lot: float
-    rounded_lot: float
-    warnings: List[str] = []
-
-class CopyPreviewResponse(BaseModel):
-    symbol: str
-    side: Literal["buy", "sell"]
-    master_lot: float
-    total_followers: int
-    total_lots_raw: float
-    total_lots_rounded: float
-    previews: List[FollowerPreview] = []
+from fastapi import APIRouter
+from .schemas import (
+    CopyPreviewRequest, CopyPreviewResponse, FollowerPreview,
+    SizingRequest, SizingResponse
+)
 
 router = APIRouter()
 
-# ---------------------------
-# Logica di sizing per regola
-# ---------------------------
 
-def _compute_raw_lot_for_follower(rule: Rule, master_lot: float, master_info: MasterInfo, fol_balance: float, fol_equity: float) -> float:
-    if isinstance(rule, ProportionalRule):
-        if rule.base == "equity":
-            base_master = master_info.equity
-            base_fol = fol_equity
-        else:
-            base_master = master_info.balance
-            base_fol = fol_balance
+@router.get("/health")
+def health():
+    return {"ok": True}
 
-        if base_master <= 0:
-            raise HTTPException(status_code=400, detail=f"Master {rule.base} deve essere > 0")
-        return master_lot * (base_fol / base_master) * rule.multiplier
 
-    if isinstance(rule, FixedRule):
-        return rule.lots
+# ---------- /sizing/calc ----------
+@router.post("/sizing/calc", response_model=SizingResponse)
+def sizing_calc(req: SizingRequest) -> SizingResponse:
+    inst = req.instrument
+    warnings = []
 
-    if isinstance(rule, LotPerUnitRule):
-        base = fol_equity if rule.base == "equity" else fol_balance
-        return (base / rule.unit) * rule.lots_per_unit
+    # budget rischio
+    if req.risk_mode == "fixed":
+        budget = req.risk_value
+    elif req.risk_mode == "percent_balance":
+        if not req.balance or req.balance <= 0:
+            return SizingResponse(suggested_lots=0, rounded_to_step=0, per_lot_risk=0, risk_at_suggested=0, warnings=["balance mancante/<=0"])
+        budget = req.balance * (req.risk_value / 100.0)
+    else:  # percent_equity
+        if not req.equity or req.equity <= 0:
+            return SizingResponse(suggested_lots=0, rounded_to_step=0, per_lot_risk=0, risk_at_suggested=0, warnings=["equity mancante/<=0"])
+        budget = req.equity * (req.risk_value / 100.0)
 
-    # fallback (non dovrebbe mai accadere)
-    raise HTTPException(status_code=400, detail="Regola non riconosciuta")
+    per_lot_ticks = (req.stop_distance + max(req.slippage, 0.0)) / inst.tick_size
+    per_lot_risk = per_lot_ticks * inst.tick_value  # EUR per 1 lot
+    if per_lot_risk <= 0:
+        return SizingResponse(suggested_lots=0, rounded_to_step=0, per_lot_risk=0, risk_at_suggested=0, warnings=["per_lot_risk <= 0"])
 
-# ---------------------------
-# Endpoint: /copy/preview
-# ---------------------------
+    suggested_lots = budget / per_lot_risk
 
+    # round down a step
+    step = inst.lot_step if inst.lot_step > 0 else 0.01
+    rounded = math.floor(suggested_lots / step) * step
+    if rounded < inst.min_lot and suggested_lots > 0:
+        warnings.append(f"lot < min_lot, alzato a {inst.min_lot}")
+        rounded = inst.min_lot
+    if inst.max_lot and rounded > inst.max_lot:
+        warnings.append(f"lot > max_lot, limitato a {inst.max_lot}")
+        rounded = inst.max_lot
+
+    return SizingResponse(
+        suggested_lots=suggested_lots,
+        rounded_to_step=rounded,
+        per_lot_risk=per_lot_risk,
+        risk_at_suggested=rounded * per_lot_risk,
+        warnings=warnings,
+    )
+
+
+# ---------- /copy/preview ----------
 @router.post("/copy/preview", response_model=CopyPreviewResponse)
-def copy_preview(payload: CopyPreviewRequest) -> CopyPreviewResponse:
-    inst = payload.instrument
-    mo = payload.master_order
-    mi = payload.master_info
+def copy_preview(req: CopyPreviewRequest) -> CopyPreviewResponse:
+    inst = req.instrument
+    step = inst.lot_step if inst.lot_step > 0 else 0.01
+    min_lot = inst.min_lot
+    max_lot = inst.max_lot
 
-    previews: List[FollowerPreview] = []
-    sum_raw = 0.0
-    sum_rounded = 0.0
-    count = 0
+    def round_down(v: float) -> float:
+        return max(0.0, math.floor(v / step) * step)
 
-    for f in payload.followers:
+    def clamp(v: float) -> tuple[float, list[str]]:
+        warns = []
+        out = v
+        if out > 0 and out < min_lot:
+            warns.append(f"lot < min_lot, alzato a {min_lot}")
+            out = min_lot
+        if max_lot is not None and out > max_lot:
+            warns.append(f"lot > max_lot, limitato a {max_lot}")
+            out = max_lot
+        return out, warns
+
+    # helper per base value
+    def base_value(x_base: str, bal: float, eq: float) -> float:
+        return eq if x_base == "equity" else bal
+
+    previews: list[FollowerPreview] = []
+    total_raw = 0.0
+    total_rounded = 0.0
+    total_followers = 0
+
+    master_bal = req.master_info.balance
+    master_eq = req.master_info.equity
+
+    for f in req.followers:
+        warnings: list[str] = []
+        raw = 0.0
         if not f.enabled:
+            previews.append(FollowerPreview(
+                follower_id=f.id, follower_name=f.name, raw_lot=0.0, rounded_lot=0.0,
+                warnings=["disabled"]
+            ))
             continue
-        raw = _compute_raw_lot_for_follower(
-            f.rule, mo.lot, mi, f.balance, f.equity
-        )
-        _, rounded, warns = _apply_lot_bounds_and_round(
-            raw, inst.min_lot, inst.lot_step, inst.max_lot
-        )
+
+        r = f.rule
+        if r.type == "proportional":
+            follower_base = base_value(r.base, f.balance, f.equity)
+            master_base = base_value(r.base, master_bal, master_eq)
+            if master_base <= 0:
+                warnings.append("master base <= 0")
+                raw = 0.0
+            else:
+                raw = req.master_order.lot * (follower_base / master_base) * r.multiplier
+        elif r.type == "fixed":
+            raw = max(0.0, r.lots)
+        else:  # lot_per_10k
+            b = base_value(r.base, f.balance, f.equity)
+            unit = r.unit if r.unit > 0 else 10_000.0
+            raw = (b / unit) * r.lots_per_unit
+
+        if raw < 0:
+            warnings.append("lot negativo corretto a 0")
+            raw = 0.0
+
+        rounded = round_down(raw)
+        if rounded != raw:
+            warnings.append(f"rounded down by step {step}")
+
+        rounded, limit_warns = clamp(rounded)
+        warnings.extend(limit_warns)
+
+        total_followers += 1
+        total_raw += raw
+        total_rounded += rounded
+
         previews.append(FollowerPreview(
             follower_id=f.id,
             follower_name=f.name,
-            raw_lot=round(raw, 8),
-            rounded_lot=rounded,
-            warnings=warns
+            raw_lot=round(raw, 6),
+            rounded_lot=round(rounded, 6),
+            warnings=warnings
         ))
-        sum_raw += raw
-        sum_rounded += rounded
-        count += 1
 
     return CopyPreviewResponse(
-        symbol=mo.symbol,
-        side=mo.side,
-        master_lot=mo.lot,
-        total_followers=count,
-        total_lots_raw=round(sum_raw, 8),
-        total_lots_rounded=round(sum_rounded, 8),
+        symbol=req.master_order.symbol,
+        side=req.master_order.side,
+        master_lot=req.master_order.lot,
+        total_followers=total_followers,
+        total_lots_raw=round(total_raw, 6),
+        total_lots_rounded=round(total_rounded, 6),
         previews=previews
     )

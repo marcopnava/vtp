@@ -1,52 +1,107 @@
 # /Users/marconava/Desktop/vtp/apps/api/vtp_api/schemas.py
-
-from typing import Optional, Literal, List
+from typing import List, Optional, Literal, Union, Annotated
 from pydantic import BaseModel, Field
 
 
 class InstrumentSpec(BaseModel):
-    """
-    Specifiche dello strumento necessarie per il sizing:
-    - tick_size: dimensione di 1 tick di prezzo (es. EURUSD 0.0001 a 4 cifre / 0.00001 a 5 cifre)
-    - tick_value: valore in EUR di 1 tick @ 1 lotto
-    - min_lot, lot_step, max_lot: vincoli di volume dello strumento
-    """
-    symbol: str = Field(..., description="Es: EURUSD, XAUUSD")
-    tick_size: float = Field(..., gt=0, description="Granularità prezzo per tick")
-    tick_value: float = Field(..., gt=0, description="Valore per 1 tick a 1 lotto (EUR)")
-    min_lot: float = Field(0.01, gt=0, description="Volume minimo per ordine")
-    lot_step: float = Field(0.01, gt=0, description="Incremento consentito dei lotti")
-    max_lot: Optional[float] = Field(None, description="Volume massimo per ordine (opzionale)")
+    symbol: str
+    tick_size: float = Field(gt=0)
+    tick_value: float  # EUR per tick @ 1 lot
+    min_lot: float = Field(ge=0)
+    lot_step: float = Field(gt=0)
+    max_lot: Optional[float] = None
+
+
+class MasterInfo(BaseModel):
+    balance: float
+    equity: float
+
+
+class MasterOrder(BaseModel):
+    symbol: str
+    side: Literal["buy", "sell"]
+    lot: float
+    sl: Optional[float] = None
+    tp: Optional[float] = None
+    comment: Optional[str] = None
+
+
+class ProportionalRule(BaseModel):
+    type: Literal["proportional"]
+    base: Literal["balance", "equity"]
+    multiplier: float = 1.0
+
+
+class FixedRule(BaseModel):
+    type: Literal["fixed"]
+    lots: float
+
+
+class LotPerUnitRule(BaseModel):
+    type: Literal["lot_per_10k"]
+    base: Literal["balance", "equity"]
+    lots_per_unit: float
+    unit: float = 10_000.0
+
+
+Rule = Annotated[Union[ProportionalRule, FixedRule, LotPerUnitRule], Field(discriminator="type")]
+
+
+class FollowerAccount(BaseModel):
+    id: str
+    name: Optional[str] = None
+    balance: float
+    equity: float
+    rule: Rule
+    enabled: bool = True
+
+
+class CopyPreviewRequest(BaseModel):
+    instrument: InstrumentSpec
+    master_info: MasterInfo
+    master_order: MasterOrder
+    followers: List[FollowerAccount]
+
+
+class FollowerPreview(BaseModel):
+    follower_id: str
+    follower_name: Optional[str] = None
+    raw_lot: float
+    rounded_lot: float
+    warnings: List[str] = []
+
+
+class CopyPreviewResponse(BaseModel):
+    symbol: str
+    side: Literal["buy", "sell"]
+    master_lot: float
+    total_followers: int
+    total_lots_raw: float
+    total_lots_rounded: float
+    previews: List[FollowerPreview]
+
+
+# ---- sizing (riuso per /sizing/calc) ----
+class SizingInstrument(BaseModel):
+    symbol: str
+    tick_size: float
+    tick_value: float
+    min_lot: float
+    lot_step: float
+    max_lot: Optional[float] = None
 
 
 class SizingRequest(BaseModel):
-    """
-    Richiesta di calcolo del lottaggio:
-    - risk_mode: 'fixed' (EUR), oppure percentuale su Balance o Equity
-    - risk_value: importo in EUR (se fixed) o percentuale (se percent_*)
-    - balance/equity: richiesti solo se usi la modalità percentuale
-    - stop_distance: distanza dello stop in UNITA' DI PREZZO (non pip, proprio prezzo)
-    - slippage: margine extra sullo stop in prezzo (es. 0.0002)
-    - instrument: specifiche strumento (tick_size, tick_value, step, ecc.)
-    """
     risk_mode: Literal["fixed", "percent_balance", "percent_equity"]
-    risk_value: float = Field(..., gt=0, description="€ se fixed, altrimenti percentuale")
-    balance: Optional[float] = Field(None, gt=0)
-    equity: Optional[float] = Field(None, gt=0)
-    stop_distance: float = Field(..., gt=0, description="Distanza stop in prezzo")
-    slippage: float = Field(0.0, ge=0, description="Margine extra in prezzo")
-    instrument: InstrumentSpec
+    risk_value: float  # € oppure %
+    balance: Optional[float] = None
+    equity: Optional[float] = None
+    stop_distance: float
+    slippage: float = 0.0
+    instrument: SizingInstrument
 
 
 class SizingResponse(BaseModel):
-    """
-    Risposta del calcolatore:
-    - suggested_lots: lotti grezzi (senza arrotondamento)
-    - rounded_to_step: lotti arrotondati allo step e clampati tra min/max
-    - per_lot_risk: rischio (EUR) per 1 lotto dato lo stop+slippage
-    - risk_at_suggested: rischio (EUR) al volume arrotondato
-    - warnings: note/avvisi (cap a max_lot, alzato a min_lot, ecc.)
-    """
     suggested_lots: float
     rounded_to_step: float
     per_lot_risk: float
