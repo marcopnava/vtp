@@ -3,11 +3,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# importa il router del calcolatore lotti (lo creeremo nel prossimo file)
-try:
-    from .sizing import router as sizing_router
-except Exception:
-    sizing_router = None
+# Routers
+from .sizing import router as sizing_router          # /sizing/calc
+from .routers import router as copy_preview_router   # /copy/preview
 
 app = FastAPI(
     title="VTP API",
@@ -31,6 +29,6 @@ app.add_middleware(
 def health():
     return {"ok": True}
 
-# monta il router del calcolatore lotti se presente
-if sizing_router:
-    app.include_router(sizing_router, prefix="/sizing", tags=["sizing"])
+# Monta i router
+app.include_router(sizing_router, prefix="/sizing", tags=["sizing"])
+app.include_router(copy_preview_router, tags=["copy"])
