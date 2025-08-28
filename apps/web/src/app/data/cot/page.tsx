@@ -11,6 +11,7 @@ import { SYMBOLS } from "@/lib/symbols";
 import type { Canonical } from "@/lib/aliases";
 import { parseCot } from "@/lib/cot";
 import { mergeCot, type MergedCotItem } from "@/lib/cot_merge";
+import { annotateConfluence } from "@/lib/cot_score";
 
 const STORAGE_DISAGG_RAW = "vtp_cot_disagg_raw";
 const STORAGE_FIN_RAW = "vtp_cot_fin_raw";
@@ -109,8 +110,9 @@ export default function COTPage() {
   const disaggParsed = useMemo(() => disaggRaw ? parseCot(disaggRaw, allowed) : [], [disaggRaw, allowed]);
   const finParsed    = useMemo(() => finRaw ? parseCot(finRaw, allowed) : [], [finRaw, allowed]);
 
-  // MERGE con precedenze e conflitti
-  const merged: MergedCotItem[] = useMemo(() => mergeCot(disaggParsed, finParsed), [disaggParsed, finParsed]);
+  // MERGE + Confluence
+  const mergedRaw: MergedCotItem[] = useMemo(() => mergeCot(disaggParsed, finParsed), [disaggParsed, finParsed]);
+  const merged = useMemo(() => annotateConfluence(mergedRaw), [mergedRaw]);
 
   // filtri UI sul merged
   const mergedFiltered = useMemo(() => {
@@ -132,17 +134,18 @@ export default function COTPage() {
   // payload export per-tab e merged
   const exportDis = { when: new Date().toISOString(), items: disaggParsed };
   const exportFin = { when: new Date().toISOString(), items: finParsed };
-  // IMPORTANT: l'export combinato per Output AI ORA USA IL MERGE (con "stance" selezionata e meta "conflict")
+  // Export combinato (MERGED) — include meta.confluence
   const exportMerged = {
     when: new Date().toISOString(),
     items: merged.map(m => ({
       symbol: m.symbol,
-      stance: m.stance,      // compat con Output AI badges
+      stance: m.stance,
       evidence: m.evidence,
       meta: {
         conflict: m.conflict,
         preferred: m.preferred,
         sources: m.sources,
+        confluence: m.confluence, // <— nuovo
         notes: m.notes ?? [],
       },
     })),
@@ -157,7 +160,7 @@ export default function COTPage() {
         <CardContent className="space-y-6">
           <div className="text-sm opacity-80">
             Incolla i testi grezzi del report. Il parser filtra solo i tuoi strumenti ({SYMBOLS.length}).<br/>
-            <b>Novità:</b> vista <i>Merged</i> con regole di precedenza (forex/index/bond → <code>financial</code>, commodity/metal → <code>disaggregated</code>) e gestione conflitti.
+            <b>Novità:</b> vista <i>Merged</i> con precedenze, gestione conflitti e <b>Confluence%</b> calcolata.
           </div>
 
           <Tabs defaultValue="disagg" className="w-full">
@@ -251,10 +254,10 @@ export default function COTPage() {
             </TabsContent>
           </Tabs>
 
-          {/* MERGED VIEW + FILTRI */}
+          {/* MERGED + FILTRI + CONFLUENCE */}
           <Card className="border-primary/40">
             <CardHeader>
-              <CardTitle className="text-base">Merged view (con precedenze + conflitti)</CardTitle>
+              <CardTitle className="text-base">Merged view (precedenze, conflitti, Confluence%)</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="flex flex-col md:flex-row gap-3 md:items-center md:justify-between">
@@ -287,7 +290,18 @@ export default function COTPage() {
                 <div className="text-sm opacity-80">Elementi (filtrati): <b>{mergedFiltered.length}</b> / totali: <b>{merged.length}</b></div>
                 <ExportBtn
                   fileName="cot_merged.json"
-                  payload={exportMerged}
+                  payload={{ when: new Date().toISOString(), items: merged.map(m => ({
+                    symbol: m.symbol,
+                    stance: m.stance,
+                    evidence: m.evidence,
+                    meta: {
+                      conflict: m.conflict,
+                      preferred: m.preferred,
+                      sources: m.sources,
+                      confluence: m.confluence,
+                      notes: m.notes ?? [],
+                    },
+                  })) }}
                   onAlsoSaveLocalKey={STORAGE_COMBINED_PARSED}
                 />
               </div>
@@ -301,11 +315,10 @@ export default function COTPage() {
                         <div className="flex items-center gap-2">
                           {m.conflict && <Badge className="bg-amber-600/30 text-amber-200">CONFLICT</Badge>}
                           <StanceBadge stance={m.stance} />
+                          <Badge className="bg-blue-600/30 text-blue-200">Conf {m.confluence}%</Badge>
                           {m.sources.map(s => <SourceBadge key={s} s={s} />)}
                           {m.preferred && (
-                            <Badge className="bg-blue-600/30 text-blue-200">
-                              preferred: {m.preferred}
-                            </Badge>
+                            <Badge className="bg-blue-600/20 text-blue-200">preferred: {m.preferred}</Badge>
                           )}
                         </div>
                       </div>
@@ -327,7 +340,7 @@ export default function COTPage() {
           </Card>
 
           <div className="text-xs opacity-70">
-            L'export <b>cot_merged.json</b> salva anche localmente in <code>{STORAGE_COMBINED_PARSED}</code> (usato da <b>Output AI</b> per i badge COT).
+            L'export <b>cot_merged.json</b> salva anche localmente in <code>{STORAGE_COMBINED_PARSED}</code> (usato da <b>Output AI</b> per i badge COT + Confluence%).
           </div>
         </CardContent>
       </Card>

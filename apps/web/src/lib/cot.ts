@@ -1,9 +1,9 @@
-// /Users/marconava/Desktop/vtp/apps/web/src/lib/cot.ts
-import { Canonical } from "./aliases";
+// apps/web/src/lib/cot.ts
+import type { Canonical } from "./aliases";
 import { ALIAS_TO_CANONICAL } from "./aliases";
 
-// Parole chiave molto semplici per stance (puoi raffinare)
-const LONG_PAT = /(net\s+long|more\s+longs|bullish|increase\s+in\s+longs|long\s+position)/i;
+// Parole chiave semplici per inferire stance
+const LONG_PAT  = /(net\s+long|more\s+longs|bullish|increase\s+in\s+longs|long\s+position)/i;
 const SHORT_PAT = /(net\s+short|more\s+shorts|bearish|increase\s+in\s+shorts|short\s+position)/i;
 
 export type CotHit = {
@@ -12,14 +12,21 @@ export type CotHit = {
   evidence: string[];
 };
 
+/**
+ * parseCot
+ * - input: testo COT grezzo (copiato/incollato)
+ * - output: hits solo per i simboli consentiti (allowed)
+ */
 export function parseCot(raw: string, allowed: Canonical[]): CotHit[] {
-  const text = raw.replace(/\r/g, " ").replace(/\t/g, " ");
+  const text  = raw.replace(/\r/g, " ").replace(/\t/g, " ");
   const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
 
-  // alias -> canonico, limitato all'universo allowed
+  // alias -> canonico (limitato a allowed)
   const aliasMap = new Map<string, Canonical>();
   for (const [alias, canon] of Object.entries(ALIAS_TO_CANONICAL)) {
-    if (allowed.includes(canon as Canonical)) aliasMap.set(alias.toUpperCase(), canon as Canonical);
+    if (allowed.includes(canon as Canonical)) {
+      aliasMap.set(alias.toUpperCase(), canon as Canonical);
+    }
   }
 
   const hits: Record<Canonical, { pos: number; evidence: string[]; score: number }> = {} as any;
@@ -28,23 +35,24 @@ export function parseCot(raw: string, allowed: Canonical[]): CotHit[] {
     const L = lines[i];
     const U = L.toUpperCase();
 
-    const matchedCanonicals = new Set<Canonical>();
+    // trova i simboli menzionati nella riga
+    const matched = new Set<Canonical>();
     for (const [alias, canon] of aliasMap.entries()) {
-      if (U.includes(alias)) matchedCanonicals.add(canon);
+      if (U.includes(alias)) matched.add(canon);
     }
-    if (matchedCanonicals.size === 0) continue;
+    if (matched.size === 0) continue;
 
-    // stance euristica (linea +/- contesto vicino)
+    // stance euristica su riga +/- contesto vicino
     let stanceScore = 0;
-    if (LONG_PAT.test(L)) stanceScore += 1;
+    if (LONG_PAT.test(L))  stanceScore += 1;
     if (SHORT_PAT.test(L)) stanceScore -= 1;
 
     const prev = lines[i - 1] ?? "";
     const next = lines[i + 1] ?? "";
-    if (LONG_PAT.test(prev) || LONG_PAT.test(next)) stanceScore += 1;
+    if (LONG_PAT.test(prev) || LONG_PAT.test(next))  stanceScore += 1;
     if (SHORT_PAT.test(prev) || SHORT_PAT.test(next)) stanceScore -= 1;
 
-    for (const sym of matchedCanonicals) {
+    for (const sym of matched) {
       const rec = (hits[sym] ??= { pos: i, evidence: [], score: 0 });
       rec.evidence.push(L);
       rec.score += stanceScore;
