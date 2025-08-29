@@ -11,9 +11,51 @@ import {
   buildPreviewRows,
   buildQueueItems,
   postQueue,
-  normalizeSymbol,      // alias→canonical
+  normalizeSymbol, // alias→canonical
   type Trade,
 } from "@/lib/tool";
+
+/** ---------- Mini Toast (inline component) ---------- **/
+type ToastKind = "success" | "error" | "info";
+function Toast({
+  kind = "info",
+  title,
+  desc,
+  onClose,
+}: {
+  kind?: ToastKind;
+  title: string;
+  desc?: string;
+  onClose: () => void;
+}) {
+  const tone =
+    kind === "success"
+      ? "bg-green-600"
+      : kind === "error"
+      ? "bg-red-600"
+      : "bg-gray-900";
+  return (
+    <div className="fixed bottom-4 right-4 z-[100]">
+      <div className={`min-w-[280px] max-w-[380px] text-white rounded-2xl shadow-lg ${tone}`}>
+        <div className="p-3">
+          <div className="flex items-start gap-3">
+            <div className="flex-1">
+              <div className="font-semibold leading-tight">{title}</div>
+              {desc ? <div className="text-sm opacity-90 mt-1">{desc}</div> : null}
+            </div>
+            <button
+              onClick={onClose}
+              className="text-white/80 hover:text-white leading-none px-2"
+              aria-label="Close"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /** ---------- Helpers ---------- **/
 
@@ -55,14 +97,7 @@ function loadFromLocalStorage(): Trade[] {
   return [];
 }
 
-/** Parser testo grezzo (line-by-line):
- * Accetta formati come:
- *   EURUSD buy 0,10 SL 1,0800 TP 1,0900
- *   US100, sell, 0.25, sl=17890, tp=17500
- *   XAUUSD buy 0.05
- * Side: buy/sell/long/short (long=buy, short=sell)
- * Numeri: virgola o punto.
- */
+/** Parser testo grezzo (line-by-line) */
 function parseRawLines(raw: string): Trade[] {
   const out: Trade[] = [];
   if (!raw) return out;
@@ -72,12 +107,9 @@ function parseRawLines(raw: string): Trade[] {
     .filter(Boolean);
 
   for (const line of lines) {
-    const L = line
-      .replace(/\t/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    const L = line.replace(/\t/g, " ").replace(/\s+/g, " ").trim();
 
-    // prova JSON-like
+    // JSON-like singola riga
     if (/^\{.+\}$/.test(L)) {
       try {
         const obj = JSON.parse(L.replace(/,(\s*[}\]])/g, "$1"));
@@ -86,41 +118,29 @@ function parseRawLines(raw: string): Trade[] {
       } catch {}
     }
 
-    // estrazione generica con regex tolleranti
-    // numeri: con virgola o punto
     const lc = L.toLowerCase();
-
-    // symbol = prima parola alfanumerica
     const symMatch = L.match(/^[A-Z0-9._-]+/i);
     let symbol = symMatch ? symMatch[0] : "";
-
-    // side
     let side: "buy" | "sell" = /(^|\s)(sell|short)(\s|$)/i.test(lc) ? "sell" : "buy";
 
-    // lot: cerca "lot" o primo float plausibile dopo symbol/side
     let lot = 0;
-    // preferisci pattern con "lot" o "lotti"
     const lotMatch =
       lc.match(/(?:lot|lotti|qty|size)\s*[:=]?\s*([0-9]+[.,]?[0-9]*)/) ||
-      lc.match(/\b([0-9]+[.,][0-9]+)\b/); // fallback: primo decimale
+      lc.match(/\b([0-9]+[.,][0-9]+)\b/);
     if (lotMatch) lot = toNumber0(lotMatch[1]);
 
-    // SL/TP
     const slMatch = lc.match(/(?:\bsl\b|stop(?:loss)?|stop)\s*[:=]?\s*([0-9]+[.,]?[0-9]*)/);
     const tpMatch = lc.match(/(?:\btp\b|take(?:profit)?)\s*[:=]?\s*([0-9]+[.,]?[0-9]*)/);
     const sl = slMatch ? toNumber0(slMatch[1]) : 0;
     const tp = tpMatch ? toNumber0(tpMatch[1]) : 0;
 
-    // se lot ancora zero, cerca un float dopo side
     if (!lot) {
       const m2 = L.match(/(?:buy|sell|long|short)\s+([0-9]+[.,]?[0-9]*)/i);
       if (m2) lot = toNumber0(m2[1]);
     }
     if (!lot) lot = 0.01;
 
-    // normalizza symbol via alias
     symbol = normalizeSymbol(symbol);
-
     out.push({ symbol, side, lot, sl, tp });
   }
   return out;
@@ -129,7 +149,7 @@ function parseRawLines(raw: string): Trade[] {
 /** ---------- Page ---------- **/
 
 export default function LiveSessionPage() {
-  const [planName, setPlanName] = useState("live-" + new Date().toISOString().slice(0, 19));
+  const [planName, setPlanName] = useState("live-" + new Date().toISOString().slice(0, 19)));
   const [baseline, setBaseline] = useState<number>(DEFAULT_BASELINE);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>([]);
@@ -137,6 +157,14 @@ export default function LiveSessionPage() {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Toast state
+  const [toast, setToast] = useState<{ kind: ToastKind; title: string; desc?: string } | null>(null);
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   // Broker suffix helper (promemoria UI)
   const [suffixHint, setSuffixHint] = useState<string>("");
@@ -189,10 +217,12 @@ export default function LiveSessionPage() {
     const arr = loadFromLocalStorage();
     if (!arr.length) {
       setError("Nessuna operazione trovata nel Pool/Calculator (localStorage).");
+      setToast({ kind: "error", title: "Import fallito", desc: "Nessun dato trovato nel Pool." });
       return;
     }
     setError(null);
     setTrades(arr);
+    setToast({ kind: "success", title: "Import riuscito", desc: `${arr.length} operazioni caricate` });
   }
 
   function clearAll() {
@@ -200,6 +230,7 @@ export default function LiveSessionPage() {
     setResult(null);
     setConfirm(false);
     setRawPaste("");
+    setToast({ kind: "info", title: "Pulito", desc: "Lista operazioni azzerata." });
   }
 
   function updateTrade(i: number, patch: Partial<Trade>) {
@@ -207,8 +238,8 @@ export default function LiveSessionPage() {
       const copy = [...prev];
       const t = { ...copy[i], ...patch };
       t.lot = toNumber0(t.lot);
-      t.sl  = toNumber0(t.sl);
-      t.tp  = toNumber0(t.tp);
+      t.sl = toNumber0(t.sl);
+      t.tp = toNumber0(t.tp);
       copy[i] = t;
       return copy;
     });
@@ -217,17 +248,39 @@ export default function LiveSessionPage() {
   async function handleOpen() {
     setError(null);
     setResult(null);
-    if (!trades.length) return setError("Nessuna operazione da inviare.");
-    if (!selectedAccounts.length) return setError("Seleziona almeno un account.");
-    if (!confirm) return setError("Spunta la conferma del recap prima di aprire.");
+    if (!trades.length) {
+      const msg = "Nessuna operazione da inviare.";
+      setError(msg);
+      setToast({ kind: "error", title: "Errore", desc: msg });
+      return;
+    }
+    if (!selectedAccounts.length) {
+      const msg = "Seleziona almeno un account.";
+      setError(msg);
+      setToast({ kind: "error", title: "Errore", desc: msg });
+      return;
+    }
+    if (!confirm) {
+      const msg = "Conferma il recap prima di aprire.";
+      setError(msg);
+      setToast({ kind: "error", title: "Errore", desc: msg });
+      return;
+    }
     try {
       setBusy(true);
       const accounts = ACCOUNTS.filter((a) => selectedAccounts.includes(a.id));
       const items = buildQueueItems(trades, accounts, baseline, planName);
       const out = await postQueue({ plan_name: planName, created_by: "live-session", items });
       setResult(out);
+      setToast({
+        kind: "success",
+        title: "Piano inviato",
+        desc: `Queued: ${out?.queued ?? 0} • Filled: ${out?.filled ?? 0} • Rejected: ${out?.rejected ?? 0}`,
+      });
     } catch (e: any) {
-      setError(e?.message || "Errore invio ordini.");
+      const msg = e?.message || "Errore invio ordini.";
+      setError(msg);
+      setToast({ kind: "error", title: "Errore invio", desc: msg });
     } finally {
       setBusy(false);
     }
@@ -242,19 +295,25 @@ export default function LiveSessionPage() {
     setError(null);
     const parsed = parseRawLines(rawPaste);
     if (!parsed.length) {
-      setError("Nessuna operazione riconosciuta nel testo incollato.");
+      const msg = "Nessuna operazione riconosciuta nel testo incollato.";
+      setError(msg);
+      setToast({ kind: "error", title: "Parse fallito", desc: msg });
       return;
     }
     setTrades(parsed);
+    setToast({ kind: "success", title: "Parse riuscito", desc: `${parsed.length} operazioni caricate` });
   }
   function onParseAppend() {
     setError(null);
     const parsed = parseRawLines(rawPaste);
     if (!parsed.length) {
-      setError("Nessuna operazione riconosciuta nel testo incollato.");
+      const msg = "Nessuna operazione riconosciuta nel testo incollato.";
+      setError(msg);
+      setToast({ kind: "error", title: "Parse fallito", desc: msg });
       return;
     }
     setTrades((prev) => [...prev, ...parsed]);
+    setToast({ kind: "success", title: "Aggiunte", desc: `${parsed.length} operazioni aggiunte` });
   }
 
   return (
@@ -274,7 +333,7 @@ export default function LiveSessionPage() {
         </div>
       </div>
 
-      {/* Paste area (NUOVO) */}
+      {/* Paste area */}
       <Card className="shadow-sm rounded-2xl">
         <CardHeader>
           <CardTitle>Incolla operazioni (testo grezzo)</CardTitle>
@@ -291,8 +350,7 @@ export default function LiveSessionPage() {
             <Button variant="ghost" size="sm" onClick={onParseAppend}>Parse & Append</Button>
           </div>
           <div className="text-muted-foreground">
-            • Accetta <b>virgole</b> nei numeri (es. 0,10) e alias (es. NAS100→US100, SPX500→SPX/US500).<br/>
-            • Capiamo anche <i>long/short</i> (long=buy, short=sell). SL/TP via “SL … / TP …” o “sl= / tp=”.
+            • Accetta <b>virgole</b> nei numeri e alias (NAS100→US100, SPX500→SPX/US500). Long=buy, Short=sell. SL/TP come “SL … / TP …” o “sl=/tp=”.
           </div>
         </CardContent>
       </Card>
@@ -536,6 +594,16 @@ export default function LiveSessionPage() {
           </ul>
         </CardContent>
       </Card>
+
+      {/* Toast mount */}
+      {toast && (
+        <Toast
+          kind={toast.kind}
+          title={toast.title}
+          desc={toast.desc}
+          onClose={() => setToast(null)}
+        />
+      )}
     </div>
   );
 }
