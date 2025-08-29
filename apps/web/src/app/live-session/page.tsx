@@ -11,7 +11,7 @@ import {
   buildPreviewRows,
   buildQueueItems,
   postQueue,
-  normalizeSymbol, // alias→canonical
+  normalizeSymbol,      // alias→canonical
   type Trade,
 } from "@/lib/tool";
 
@@ -57,18 +57,33 @@ function Toast({
   );
 }
 
-/** ---------- Helpers ---------- **/
+/** ---------- Helpers numeri ---------- **/
 
-function toNumber0(v: any): number {
+// Converte stringhe con migliaia/decimali misti (es. "4,401.1" -> 4401.1, "1,0800" -> 1.0800)
+function toSmartFloat(v: any): number {
   if (v === null || v === undefined) return 0;
   if (typeof v === "number") return isFinite(v) ? v : 0;
-  const s = String(v).trim().replace(",", "."); // virgola -> punto
+  let s = String(v).trim().replace(/\s+/g, "");
+  const hasDot = s.includes(".");
+  const hasComma = s.includes(",");
+  if (hasDot && hasComma) {
+    // supponiamo virgola = separatore migliaia, punto = decimale
+    s = s.replace(/,/g, "");
+  } else if (!hasDot && hasComma) {
+    // solo virgola -> usala come decimale
+    s = s.replace(/,/g, ".");
+  }
   const n = Number(s);
   return isFinite(n) ? n : 0;
 }
+
+function toNumber0(v: any): number {
+  return toSmartFloat(v);
+}
+
 function sanitizeTrade(t: any): Trade {
   return {
-    symbol: String(t.symbol || "").toUpperCase(),
+    symbol: normalizeSymbol(String(t.symbol || "").toUpperCase()),
     side: (String(t.side || "buy").toLowerCase() === "sell" ? "sell" : "buy") as "buy" | "sell",
     lot: toNumber0(t.lot) || 0.01,
     sl: toNumber0(t.sl || 0) || 0,
@@ -76,7 +91,7 @@ function sanitizeTrade(t: any): Trade {
   };
 }
 
-/** Prova a importare da localStorage usando più chiavi "probabili" */
+/** ---------- Import Pool (localStorage) ---------- */
 function loadFromLocalStorage(): Trade[] {
   const candidates = [
     "vtp_pool_confirmed",
@@ -97,59 +112,92 @@ function loadFromLocalStorage(): Trade[] {
   return [];
 }
 
-/** Parser testo grezzo (line-by-line) */
-function parseRawLines(raw: string): Trade[] {
-  const out: Trade[] = [];
-  if (!raw) return out;
-  const lines = raw
-    .split(/\r?\n/)
+/** ---------- Parser testo grezzo ---------- **
+ * Supporta:
+ *  A) Formato “AI note” multi-riga, es:
+ *     Buy ETHUSD (Ethereum): Confluence 85%...
+ *     Entry: 4,401.1
+ *     SL: 4,225.1 ...
+ *     TP1: 4,730.4 (...), TP2: ..., TP3: ...
+ *     -> side=buy, symbol=ETHUSD, sl=4225.1, tp=4730.4 (TP1), lot=0.01 (editabile)
+ *
+ *  B) Formati compatti a riga singola:
+ *     EURUSD buy 0,10 SL 1,0800 TP 1,0900
+ *     US100, sell, 0.25, sl=17890, tp=17500
+ *     XAUUSD buy 0.05
+ *     long/short accettati (long=buy, short=sell)
+ */
+function parseRawText(raw: string): Trade[] {
+  if (!raw) return [];
+  const text = raw.replace(/\r/g, "").trim();
+  const trades: Trade[] = [];
+
+  // 1) Prova a estrarre blocchi AI: (Buy|Sell) SYMBOL ... Entry: ... SL: ... TP1: ...
+  // Cattura multipli nel testo.
+  const aiRegex = /(Buy|Sell)\s+([A-Z0-9._-]+)(?:\s*\([^)]+\))?[\s\S]*?Entry\s*:\s*([0-9.,]+)[\s\S]*?SL\s*:\s*([0-9.,]+)[\s\S]*?(?:TP1?\s*:\s*|TP\s*:\s*)([0-9.,]+)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = aiRegex.exec(text)) !== null) {
+    const side = m[1].toLowerCase() === "sell" ? "sell" : "buy";
+    const symbol = normalizeSymbol(m[2]);
+    // Entry lo ignoriamo per ora (apriamo a mercato)
+    const sl = toSmartFloat(m[4]);
+    const tp = toSmartFloat(m[5]);
+    trades.push({ symbol, side: side as "buy" | "sell", lot: 0.01, sl, tp });
+  }
+
+  // Se abbiamo trovato almeno un blocco AI, ritorna.
+  if (trades.length) return trades.map(sanitizeTrade);
+
+  // 2) Altrimenti fallback line-by-line (formati compatti)
+  const lines = text
+    .split(/\n+/)
     .map((l) => l.trim())
     .filter(Boolean);
 
   for (const line of lines) {
     const L = line.replace(/\t/g, " ").replace(/\s+/g, " ").trim();
-
     // JSON-like singola riga
     if (/^\{.+\}$/.test(L)) {
       try {
         const obj = JSON.parse(L.replace(/,(\s*[}\]])/g, "$1"));
-        out.push(sanitizeTrade(obj));
+        trades.push(sanitizeTrade(obj));
         continue;
       } catch {}
     }
-
     const lc = L.toLowerCase();
+    // symbol = prima parola
     const symMatch = L.match(/^[A-Z0-9._-]+/i);
-    let symbol = symMatch ? symMatch[0] : "";
+    let symbol = symMatch ? normalizeSymbol(symMatch[0]) : "";
+    // side
     let side: "buy" | "sell" = /(^|\s)(sell|short)(\s|$)/i.test(lc) ? "sell" : "buy";
-
+    // lot
     let lot = 0;
     const lotMatch =
       lc.match(/(?:lot|lotti|qty|size)\s*[:=]?\s*([0-9]+[.,]?[0-9]*)/) ||
       lc.match(/\b([0-9]+[.,][0-9]+)\b/);
-    if (lotMatch) lot = toNumber0(lotMatch[1]);
-
-    const slMatch = lc.match(/(?:\bsl\b|stop(?:loss)?|stop)\s*[:=]?\s*([0-9]+[.,]?[0-9]*)/);
-    const tpMatch = lc.match(/(?:\btp\b|take(?:profit)?)\s*[:=]?\s*([0-9]+[.,]?[0-9]*)/);
-    const sl = slMatch ? toNumber0(slMatch[1]) : 0;
-    const tp = tpMatch ? toNumber0(tpMatch[1]) : 0;
-
+    if (lotMatch) lot = toSmartFloat(lotMatch[1]);
     if (!lot) {
       const m2 = L.match(/(?:buy|sell|long|short)\s+([0-9]+[.,]?[0-9]*)/i);
-      if (m2) lot = toNumber0(m2[1]);
+      if (m2) lot = toSmartFloat(m2[1]);
     }
     if (!lot) lot = 0.01;
 
-    symbol = normalizeSymbol(symbol);
-    out.push({ symbol, side, lot, sl, tp });
+    // SL/TP
+    const slMatch = lc.match(/(?:\bsl\b|stop(?:loss)?|stop)\s*[:=]?\s*([0-9]+[.,]?[0-9]*)/);
+    const tpMatch = lc.match(/(?:\btp\b|take(?:profit)?)\s*[:=]?\s*([0-9]+[.,]?[0-9]*)/);
+    const sl = slMatch ? toSmartFloat(slMatch[1]) : 0;
+    const tp = tpMatch ? toSmartFloat(tpMatch[1]) : 0;
+
+    trades.push({ symbol, side, lot, sl, tp });
   }
-  return out;
+
+  return trades.map(sanitizeTrade);
 }
 
 /** ---------- Page ---------- **/
 
 export default function LiveSessionPage() {
-  const [planName, setPlanName] = useState("live-" + new Date().toISOString().slice(0, 19)));
+  const [planName, setPlanName] = useState("live-" + new Date().toISOString().slice(0, 19));
   const [baseline, setBaseline] = useState<number>(DEFAULT_BASELINE);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>([]);
@@ -158,7 +206,7 @@ export default function LiveSessionPage() {
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Toast state
+  // Toast
   const [toast, setToast] = useState<{ kind: ToastKind; title: string; desc?: string } | null>(null);
   useEffect(() => {
     if (!toast) return;
@@ -238,8 +286,8 @@ export default function LiveSessionPage() {
       const copy = [...prev];
       const t = { ...copy[i], ...patch };
       t.lot = toNumber0(t.lot);
-      t.sl = toNumber0(t.sl);
-      t.tp = toNumber0(t.tp);
+      t.sl  = toNumber0(t.sl);
+      t.tp  = toNumber0(t.tp);
       copy[i] = t;
       return copy;
     });
@@ -293,7 +341,7 @@ export default function LiveSessionPage() {
 
   function onParseReplace() {
     setError(null);
-    const parsed = parseRawLines(rawPaste);
+    const parsed = parseRawText(rawPaste);
     if (!parsed.length) {
       const msg = "Nessuna operazione riconosciuta nel testo incollato.";
       setError(msg);
@@ -305,7 +353,7 @@ export default function LiveSessionPage() {
   }
   function onParseAppend() {
     setError(null);
-    const parsed = parseRawLines(rawPaste);
+    const parsed = parseRawText(rawPaste);
     if (!parsed.length) {
       const msg = "Nessuna operazione riconosciuta nel testo incollato.";
       setError(msg);
@@ -341,7 +389,7 @@ export default function LiveSessionPage() {
         <CardContent className="space-y-3 text-sm">
           <textarea
             className="w-full min-h-32 border rounded-2xl p-3 font-mono text-xs shadow-sm"
-            placeholder={`Esempi:\nEURUSD buy 0,10 SL 1,0800 TP 1,0900\nUS100, sell, 0.25, sl=17890, tp=17500\nXAUUSD buy 0.05`}
+            placeholder={`Incolla qui. Esempio supportato:\n\nBuy ETHUSD (Ethereum): Confluence 85%...\nEntry: 4,401.1\nSL: 4,225.1 (...)\nTP1: 4,730.4 (...), TP2: ..., TP3: ...\n\nOppure formati compatti:\nEURUSD buy 0,10 SL 1,0800 TP 1,0900\nUS100, sell, 0.25, sl=17890, tp=17500`}
             value={rawPaste}
             onChange={(e) => setRawPaste(e.target.value)}
           />
@@ -350,7 +398,8 @@ export default function LiveSessionPage() {
             <Button variant="ghost" size="sm" onClick={onParseAppend}>Parse & Append</Button>
           </div>
           <div className="text-muted-foreground">
-            • Accetta <b>virgole</b> nei numeri e alias (NAS100→US100, SPX500→SPX/US500). Long=buy, Short=sell. SL/TP come “SL … / TP …” o “sl=/tp=”.
+            • Capisco blocchi “Buy/Sell … Entry … SL … TP1 …” (uso TP1 come TP).  
+            • Numeri con virgola/punto e migliaia (es. 4,401.1 o 1,0800). Long=buy, Short=sell.
           </div>
         </CardContent>
       </Card>
