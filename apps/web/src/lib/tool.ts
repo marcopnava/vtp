@@ -113,3 +113,24 @@ export async function fetchPlanStatus(planId: number) {
   if (!res.ok) throw new Error(`Status failed: ${res.status}`);
   return res.json();
 }
+import { useEffect, useState } from "react";
+
+export function useTool() {
+  const [enabled, setEnabledState] = useState<boolean>(false);
+
+  useEffect(() => {
+    try {
+      const val = window.localStorage.getItem("vtp_tool_enabled");
+      setEnabledState(val === "1");
+    } catch {}
+  }, []);
+
+  const setEnabled = (v: boolean) => {
+    setEnabledState(v);
+    try {
+      window.localStorage.setItem("vtp_tool_enabled", v ? "1" : "0");
+    } catch {}
+  };
+
+  return { enabled, setEnabled };
+}
