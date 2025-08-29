@@ -1,103 +1,357 @@
+// apps/web/src/app/live-session/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import Link from "next/link";
-import { useToolEnabled } from "@/lib/tool";
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  ACCOUNTS,
+  BASELINE_EQUITY as DEFAULT_BASELINE,
+  buildPreviewRows,
+  buildQueueItems,
+  postQueue,
+  type Trade,
+} from "@/lib/tool";
+
+/** ---------- Helpers ---------- **/
+
+function toNumber0(v: any): number {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return isFinite(v) ? v : 0;
+  const s = String(v).trim().replace(",", "."); // virgola -> punto
+  const n = Number(s);
+  return isFinite(n) ? n : 0;
+}
+
+function sanitizeTrade(t: any): Trade {
+  return {
+    symbol: String(t.symbol || "").toUpperCase(),
+    side: (String(t.side || "buy").toLowerCase() === "sell" ? "sell" : "buy") as "buy" | "sell",
+    lot: toNumber0(t.lot) || 0.01,
+    sl: toNumber0(t.sl || 0) || 0,
+    tp: toNumber0(t.tp || 0) || 0,
+  };
+}
+
+/** Prova a importare da localStorage usando più chiavi "probabili" */
+function loadFromLocalStorage(): Trade[] {
+  const candidates = [
+    "vtp_pool_confirmed",
+    "vtp_calculator_trades",
+    "vtp_selected_trades",
+    "vtp_pool_selected",
+  ];
+  for (const key of candidates) {
+    try {
+      const raw = window.localStorage.getItem(key);
+      if (!raw) continue;
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr) && arr.length) {
+        return arr.map(sanitizeTrade);
+      }
+    } catch {}
+  }
+  return [];
+}
+
+/** ---------- Page ---------- **/
 
 export default function LiveSessionPage() {
-  const { enabled, setEnabled } = useToolEnabled();
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
+  const [planName, setPlanName] = useState("live-" + new Date().toISOString().slice(0, 19));
+  const [baseline, setBaseline] = useState<number>(DEFAULT_BASELINE);
+  const [trades, setTrades] = useState<Trade[]>([]);
+  const [selectedAccounts, setSelectedAccounts] = useState<string[]>([]);
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  // Safety Guard: ON = blocca esecuzioni reali (solo DRY RUN)
-  const [safetyGuard, setSafetyGuard] = useState<boolean>(true);
-  const [apiOk, setApiOk] = useState<null | boolean>(null);
-  const [pingMsg, setPingMsg] = useState<string>("");
-
+  // Import iniziale (se già presente in localStorage)
   useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch(`${apiBase}/health`);
-        setApiOk(res.ok);
-        const data = await res.json().catch(() => ({}));
-        setPingMsg(res.ok ? JSON.stringify(data) : `HTTP ${res.status}`);
-      } catch (e: any) {
-        setApiOk(false);
-        setPingMsg(e?.message ?? "Network error");
-      }
-    })();
-  }, [apiBase]);
+    try {
+      const pre = loadFromLocalStorage();
+      if (pre.length) setTrades(pre);
+    } catch {}
+  }, []);
+
+  const allChecked = useMemo(
+    () => selectedAccounts.length === ACCOUNTS.length && ACCOUNTS.length > 0,
+    [selectedAccounts]
+  );
+
+  const preview = useMemo(() => {
+    if (!trades.length || !selectedAccounts.length) return [];
+    const accounts = ACCOUNTS.filter((a) => selectedAccounts.includes(a.id));
+    return buildPreviewRows(trades, accounts, baseline);
+  }, [trades, selectedAccounts, baseline]);
+
+  function toggleAll() {
+    setSelectedAccounts(allChecked ? [] : ACCOUNTS.map((a) => a.id));
+  }
+  function toggleOne(id: string, checked: boolean | string) {
+    setSelectedAccounts((xs) => (checked === true ? [...new Set([...xs, id])] : xs.filter((x) => x !== id)));
+  }
+
+  function importFromPool() {
+    const arr = loadFromLocalStorage();
+    if (!arr.length) {
+      setError("Nessuna operazione trovata nel Pool/Calculator (localStorage).");
+      return;
+    }
+    setError(null);
+    setTrades(arr);
+  }
+
+  function clearAll() {
+    setTrades([]);
+    setResult(null);
+    setConfirm(false);
+  }
+
+  function updateTrade(i: number, patch: Partial<Trade>) {
+    setTrades((prev) => {
+      const copy = [...prev];
+      const t = { ...copy[i], ...patch };
+      // sanifica numeri con virgola
+      t.lot = toNumber0(t.lot);
+      t.sl = toNumber0(t.sl);
+      t.tp = toNumber0(t.tp);
+      copy[i] = t;
+      return copy;
+    });
+  }
+
+  async function handleOpen() {
+    setError(null);
+    setResult(null);
+    if (!trades.length) return setError("Nessuna operazione da inviare.");
+    if (!selectedAccounts.length) return setError("Seleziona almeno un account.");
+    if (!confirm) return setError("Spunta la conferma del recap prima di aprire.");
+    try {
+      setBusy(true);
+      const accounts = ACCOUNTS.filter((a) => selectedAccounts.includes(a.id));
+      const items = buildQueueItems(trades, accounts, baseline, planName);
+      const out = await postQueue({ plan_name: planName, created_by: "live-session", items });
+      setResult(out);
+    } catch (e: any) {
+      setError(e?.message || "Errore invio ordini.");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
-    <div className="p-6 max-w-7xl mx-auto space-y-6">
+    <div className="mx-auto max-w-6xl p-6 space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">Live Session</h1>
+        <div className="flex items-center gap-2">
+          <input
+            className="border rounded px-3 py-2 w-[360px]"
+            value={planName}
+            onChange={(e) => setPlanName(e.target.value)}
+            placeholder="Plan name"
+          />
+          <Button variant="secondary" onClick={importFromPool}>Import from Pool</Button>
+          <Button variant="ghost" onClick={clearAll}>Clear</Button>
+        </div>
+      </div>
+
+      {/* Accounts + Baseline */}
       <Card>
-        <CardHeader><CardTitle>Live Session — Control Room</CardTitle></CardHeader>
-        <CardContent className="grid gap-6 md:grid-cols-3">
-          {/* Colonna 1: Stato API + Toggle Tool */}
-          <div className="space-y-4">
-            <div className="text-sm">
-              <div className="opacity-80">API base:</div>
-              <div className="font-mono">{apiBase}</div>
-              <div className={`mt-2 text-sm ${apiOk ? "text-green-400" : "text-red-400"}`}>
-                {apiOk === null ? "Checking..." : apiOk ? "API OK" : "API ERROR"} {pingMsg && `— ${pingMsg}`}
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label className="text-base">Tool</Label>
-              <div className="text-sm opacity-80">Stato globale: <b>{enabled ? "ON" : "OFF"}</b></div>
-              <div className="flex gap-3">
-                <Button variant={enabled ? "secondary" : "default"} onClick={() => setEnabled(!enabled)}>
-                  {enabled ? "Turn OFF" : "Turn ON"}
-                </Button>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label className="text-base">Safety Guard</Label>
-              <div className="text-sm opacity-80">
-                {safetyGuard
-                  ? "ON — nessuna esecuzione reale (solo DRY RUN / preview)"
-                  : "OFF — attenzione: esecuzioni reali abilitate (quando collegheremo MT4)"}
-              </div>
-              <div className="flex gap-3">
-                <Button variant={safetyGuard ? "default" : "secondary"} onClick={() => setSafetyGuard((s) => !s)}>
-                  {safetyGuard ? "Disable Guard" : "Enable Guard"}
-                </Button>
-              </div>
-            </div>
+        <CardHeader>
+          <CardTitle>Accounts & Baseline</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center gap-3">
+            <Checkbox checked={allChecked} onCheckedChange={toggleAll} />
+            <span className="text-sm text-muted-foreground">Seleziona tutti</span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+            {ACCOUNTS.map((acc) => {
+              const checked = selectedAccounts.includes(acc.id);
+              return (
+                <label
+                  key={acc.id}
+                  className={`border rounded-xl p-3 flex items-center gap-2 ${checked ? "bg-muted" : ""}`}
+                >
+                  <Checkbox checked={checked} onCheckedChange={(ch) => toggleOne(acc.id, ch)} />
+                  <div>
+                    <div className="font-medium">{acc.label}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {acc.id} • equity ~ {acc.equity}
+                    </div>
+                  </div>
+                </label>
+              );
+            })}
           </div>
 
-          {/* Colonna 2: Comandi sessione (placeholder) */}
-          <div className="space-y-4">
-            <Label className="text-base">Session Commands</Label>
-            <div className="flex gap-3">
-              <Button disabled>Start DRY RUN</Button>
-              <Button variant="secondary" disabled>Execute Copy (coming soon)</Button>
-            </div>
-            <div className="text-xs opacity-70">
-              Collegheremo l’endpoint <code>/copy/execute</code>. Con Safety Guard ON resterà in DRY RUN.
-            </div>
-          </div>
-
-          {/* Colonna 3: Link rapidi */}
-          <div className="space-y-2">
-            <Label className="text-base">Shortcuts</Label>
-            <div className="flex flex-col gap-2">
-              <Link className="underline opacity-90 hover:opacity-100" href="/output-ai">Apri Output AI</Link>
-              <Link className="underline opacity-90 hover:opacity-100" href="/orders">Vai a Orders (Preview)</Link>
-              <Link className="underline opacity-90 hover:opacity-100" href="/sizing-calculator">Apri Calculator</Link>
-            </div>
+          <div className="flex items-center gap-3">
+            <span className="w-40 text-sm">Baseline equity</span>
+            <input
+              className="border rounded px-3 py-2 w-60"
+              type="number"
+              value={baseline}
+              min={100}
+              step={100}
+              onChange={(e) => setBaseline(Number(e.target.value))}
+            />
+            <span className="text-xs text-muted-foreground">
+              I lotti si scalano: lot_scaled = lot_base × equity / baseline
+            </span>
           </div>
         </CardContent>
       </Card>
 
+      {/* Trades editor */}
       <Card>
-        <CardHeader><CardTitle>Activity Feed (coming soon)</CardTitle></CardHeader>
-        <CardContent className="text-sm opacity-80">
-          Qui vedrai: richieste di preview, esiti (OK/ERR), tempi di risposta e—quando abiliteremo il bridge—ID ordini, slippage, esecuzioni per account.
+        <CardHeader>
+          <CardTitle>Operazioni (importate dal Pool o editabili qui)</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {!trades.length && (
+            <div className="text-sm text-muted-foreground">
+              Nessuna operazione. Usa <b>Import from Pool</b> oppure incolla manualmente qui sotto.
+            </div>
+          )}
+
+          {trades.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left border-b">
+                    <th className="py-2 pr-3">Symbol</th>
+                    <th className="py-2 pr-3">Side</th>
+                    <th className="py-2 pr-3">Base lot</th>
+                    <th className="py-2 pr-3">SL (price)</th>
+                    <th className="py-2 pr-3">TP (price)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trades.map((t, i) => (
+                    <tr key={i} className="border-b last:border-0">
+                      <td className="py-2 pr-3">
+                        <input
+                          value={t.symbol}
+                          onChange={(e) => updateTrade(i, { symbol: e.target.value.toUpperCase() })}
+                          className="border rounded px-2 py-1 w-36"
+                        />
+                      </td>
+                      <td className="py-2 pr-3">
+                        <select
+                          value={t.side}
+                          onChange={(e) =>
+                            updateTrade(i, { side: e.target.value === "sell" ? "sell" : "buy" })
+                          }
+                          className="border rounded px-2 py-1 w-28"
+                        >
+                          <option value="buy">buy</option>
+                          <option value="sell">sell</option>
+                        </select>
+                      </td>
+                      <td className="py-2 pr-3">
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0.01"
+                          value={t.lot}
+                          onChange={(e) => updateTrade(i, { lot: toNumber0(e.target.value) })}
+                          className="border rounded px-2 py-1 w-28"
+                        />
+                      </td>
+                      <td className="py-2 pr-3">
+                        <input
+                          value={String(t.sl ?? 0)}
+                          onChange={(e) => updateTrade(i, { sl: toNumber0(e.target.value) })}
+                          className="border rounded px-2 py-1 w-32"
+                          placeholder="0 = none"
+                        />
+                      </td>
+                      <td className="py-2 pr-3">
+                        <input
+                          value={String(t.tp ?? 0)}
+                          onChange={(e) => updateTrade(i, { tp: toNumber0(e.target.value) })}
+                          className="border rounded px-2 py-1 w-32"
+                          placeholder="0 = none"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Recap + Confirm + Open */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Recap</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {!selectedAccounts.length || !trades.length ? (
+            <div className="text-sm text-muted-foreground">
+              Seleziona almeno un account e aggiungi operazioni per vedere il recap.
+            </div>
+          ) : (
+            <>
+              <div className="text-sm">
+                Operazioni totali: <b>{trades.length}</b> • Righe recap: <b>{preview.length}</b>
+              </div>
+              <div className="max-h-72 overflow-auto border rounded">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left border-b">
+                      <th className="py-2 px-2">Account</th>
+                      <th className="py-2 px-2">Symbol</th>
+                      <th className="py-2 px-2">Side</th>
+                      <th className="py-2 px-2">Base lot</th>
+                      <th className="py-2 px-2">Scaled lot</th>
+                      <th className="py-2 px-2">SL</th>
+                      <th className="py-2 px-2">TP</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.map((r, idx) => (
+                      <tr key={idx} className="border-b last:border-0">
+                        <td className="py-1 px-2">{r.account_label}</td>
+                        <td className="py-1 px-2">{r.symbol}</td>
+                        <td className="py-1 px-2">{r.side}</td>
+                        <td className="py-1 px-2">{r.base_lot}</td>
+                        <td className="py-1 px-2 font-medium">{r.scaled_lot}</td>
+                        <td className="py-1 px-2">{r.sl ?? 0}</td>
+                        <td className="py-1 px-2">{r.tp ?? 0}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+
+          <label className="flex items-center gap-3">
+            <Checkbox checked={confirm} onCheckedChange={(v) => setConfirm(v === true)} />
+            <span className="text-sm">
+              Confermo lotti / SL / TP per gli ordini da inviare (vedi recap).
+            </span>
+          </label>
+
+          <div className="flex gap-3">
+            <Button disabled={!confirm || !selectedAccounts.length || !trades.length || busy} onClick={handleOpen}>
+              {busy ? "Sending…" : "Open Trade"}
+            </Button>
+          </div>
+
+          {error && <div className="text-sm text-red-600">{error}</div>}
+          {result && (
+            <div className="text-sm">
+              queued: <b>{result.queued ?? 0}</b> • reserved: <b>{result.reserved ?? 0}</b> • filled:{" "}
+              <b>{result.filled ?? 0}</b> • rejected: <b>{result.rejected ?? 0}</b>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
