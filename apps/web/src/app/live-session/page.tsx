@@ -11,7 +11,7 @@ import {
   buildPreviewRows,
   buildQueueItems,
   postQueue,
-  normalizeSymbol,      // <— nuovo: per test alias→canonical
+  normalizeSymbol,      // alias→canonical
   type Trade,
 } from "@/lib/tool";
 
@@ -24,7 +24,6 @@ function toNumber0(v: any): number {
   const n = Number(s);
   return isFinite(n) ? n : 0;
 }
-
 function sanitizeTrade(t: any): Trade {
   return {
     symbol: String(t.symbol || "").toUpperCase(),
@@ -56,6 +55,77 @@ function loadFromLocalStorage(): Trade[] {
   return [];
 }
 
+/** Parser testo grezzo (line-by-line):
+ * Accetta formati come:
+ *   EURUSD buy 0,10 SL 1,0800 TP 1,0900
+ *   US100, sell, 0.25, sl=17890, tp=17500
+ *   XAUUSD buy 0.05
+ * Side: buy/sell/long/short (long=buy, short=sell)
+ * Numeri: virgola o punto.
+ */
+function parseRawLines(raw: string): Trade[] {
+  const out: Trade[] = [];
+  if (!raw) return out;
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    const L = line
+      .replace(/\t/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    // prova JSON-like
+    if (/^\{.+\}$/.test(L)) {
+      try {
+        const obj = JSON.parse(L.replace(/,(\s*[}\]])/g, "$1"));
+        out.push(sanitizeTrade(obj));
+        continue;
+      } catch {}
+    }
+
+    // estrazione generica con regex tolleranti
+    // numeri: con virgola o punto
+    const lc = L.toLowerCase();
+
+    // symbol = prima parola alfanumerica
+    const symMatch = L.match(/^[A-Z0-9._-]+/i);
+    let symbol = symMatch ? symMatch[0] : "";
+
+    // side
+    let side: "buy" | "sell" = /(^|\s)(sell|short)(\s|$)/i.test(lc) ? "sell" : "buy";
+
+    // lot: cerca "lot" o primo float plausibile dopo symbol/side
+    let lot = 0;
+    // preferisci pattern con "lot" o "lotti"
+    const lotMatch =
+      lc.match(/(?:lot|lotti|qty|size)\s*[:=]?\s*([0-9]+[.,]?[0-9]*)/) ||
+      lc.match(/\b([0-9]+[.,][0-9]+)\b/); // fallback: primo decimale
+    if (lotMatch) lot = toNumber0(lotMatch[1]);
+
+    // SL/TP
+    const slMatch = lc.match(/(?:\bsl\b|stop(?:loss)?|stop)\s*[:=]?\s*([0-9]+[.,]?[0-9]*)/);
+    const tpMatch = lc.match(/(?:\btp\b|take(?:profit)?)\s*[:=]?\s*([0-9]+[.,]?[0-9]*)/);
+    const sl = slMatch ? toNumber0(slMatch[1]) : 0;
+    const tp = tpMatch ? toNumber0(tpMatch[1]) : 0;
+
+    // se lot ancora zero, cerca un float dopo side
+    if (!lot) {
+      const m2 = L.match(/(?:buy|sell|long|short)\s+([0-9]+[.,]?[0-9]*)/i);
+      if (m2) lot = toNumber0(m2[1]);
+    }
+    if (!lot) lot = 0.01;
+
+    // normalizza symbol via alias
+    symbol = normalizeSymbol(symbol);
+
+    out.push({ symbol, side, lot, sl, tp });
+  }
+  return out;
+}
+
 /** ---------- Page ---------- **/
 
 export default function LiveSessionPage() {
@@ -68,12 +138,15 @@ export default function LiveSessionPage() {
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Helper punto 4: hint suffisso broker (UI only, promemoria)
+  // Broker suffix helper (promemoria UI)
   const [suffixHint, setSuffixHint] = useState<string>("");
   const [aliasTestIn, setAliasTestIn] = useState<string>("US500");
   const [aliasTestOut, setAliasTestOut] = useState<string>("");
 
-  // Import iniziale (se già presente in localStorage)
+  // Paste area state
+  const [rawPaste, setRawPaste] = useState<string>("");
+
+  // Import iniziale
   useEffect(() => {
     try {
       const pre = loadFromLocalStorage();
@@ -81,7 +154,7 @@ export default function LiveSessionPage() {
     } catch {}
   }, []);
 
-  // Carica/salva hint suffix in localStorage (solo promemoria)
+  // Suffix hint
   useEffect(() => {
     try {
       const s = window.localStorage.getItem("vtp_broker_suffix_hint") || "";
@@ -126,16 +199,16 @@ export default function LiveSessionPage() {
     setTrades([]);
     setResult(null);
     setConfirm(false);
+    setRawPaste("");
   }
 
   function updateTrade(i: number, patch: Partial<Trade>) {
     setTrades((prev) => {
       const copy = [...prev];
       const t = { ...copy[i], ...patch };
-      // sanifica numeri con virgola
       t.lot = toNumber0(t.lot);
-      t.sl = toNumber0(t.sl);
-      t.tp = toNumber0(t.tp);
+      t.sl  = toNumber0(t.sl);
+      t.tp  = toNumber0(t.tp);
       copy[i] = t;
       return copy;
     });
@@ -165,6 +238,25 @@ export default function LiveSessionPage() {
     setAliasTestOut(out);
   }
 
+  function onParseReplace() {
+    setError(null);
+    const parsed = parseRawLines(rawPaste);
+    if (!parsed.length) {
+      setError("Nessuna operazione riconosciuta nel testo incollato.");
+      return;
+    }
+    setTrades(parsed);
+  }
+  function onParseAppend() {
+    setError(null);
+    const parsed = parseRawLines(rawPaste);
+    if (!parsed.length) {
+      setError("Nessuna operazione riconosciuta nel testo incollato.");
+      return;
+    }
+    setTrades((prev) => [...prev, ...parsed]);
+  }
+
   return (
     <div className="mx-auto max-w-6xl p-6 space-y-6">
       {/* Header */}
@@ -181,6 +273,29 @@ export default function LiveSessionPage() {
           <Button variant="ghost" onClick={clearAll}>Clear</Button>
         </div>
       </div>
+
+      {/* Paste area (NUOVO) */}
+      <Card className="shadow-sm rounded-2xl">
+        <CardHeader>
+          <CardTitle>Incolla operazioni (testo grezzo)</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          <textarea
+            className="w-full min-h-32 border rounded-2xl p-3 font-mono text-xs shadow-sm"
+            placeholder={`Esempi:\nEURUSD buy 0,10 SL 1,0800 TP 1,0900\nUS100, sell, 0.25, sl=17890, tp=17500\nXAUUSD buy 0.05`}
+            value={rawPaste}
+            onChange={(e) => setRawPaste(e.target.value)}
+          />
+          <div className="flex gap-2">
+            <Button variant="secondary" size="sm" onClick={onParseReplace}>Parse & Replace</Button>
+            <Button variant="ghost" size="sm" onClick={onParseAppend}>Parse & Append</Button>
+          </div>
+          <div className="text-muted-foreground">
+            • Accetta <b>virgole</b> nei numeri (es. 0,10) e alias (es. NAS100→US100, SPX500→SPX/US500).<br/>
+            • Capiamo anche <i>long/short</i> (long=buy, short=sell). SL/TP via “SL … / TP …” o “sl= / tp=”.
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Accounts + Baseline */}
       <Card className="shadow-sm rounded-2xl">
@@ -232,12 +347,12 @@ export default function LiveSessionPage() {
       {/* Trades editor */}
       <Card className="shadow-sm rounded-2xl">
         <CardHeader>
-          <CardTitle>Operazioni (importate dal Pool o editabili qui)</CardTitle>
+          <CardTitle>Operazioni (importate o incollate)</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           {!trades.length && (
             <div className="text-sm text-muted-foreground">
-              Nessuna operazione. Usa <b>Import from Pool</b> oppure inserisci manualmente.
+              Nessuna operazione. Usa <b>Import from Pool</b> o incolla nel riquadro sopra.
             </div>
           )}
 
@@ -379,7 +494,7 @@ export default function LiveSessionPage() {
         </CardContent>
       </Card>
 
-      {/* Punto 4 — Broker Suffix Helper (UI only) */}
+      {/* Broker Suffix Helper (promemoria) */}
       <Card className="shadow-sm rounded-2xl">
         <CardHeader>
           <CardTitle>Broker Symbols & Suffix helper</CardTitle>
@@ -387,7 +502,6 @@ export default function LiveSessionPage() {
         <CardContent className="space-y-3 text-sm">
           <div className="text-muted-foreground">
             Imposta il suffisso broker direttamente negli <b>Input</b> dell’EA <b>VTP_Executor</b> (campo <b>SYMBOL_SUFFIX</b>).
-            Questo riquadro è solo un promemoria per te.
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -399,7 +513,7 @@ export default function LiveSessionPage() {
               onChange={(e) => setSuffixHint(e.target.value)}
             />
             <span className="text-xs text-muted-foreground">
-              (non modifica il payload; serve solo come promemoria, l’EA aggiunge il suffisso)
+              (non modifica il payload; l’EA aggiunge il suffisso)
             </span>
           </div>
 
@@ -415,7 +529,7 @@ export default function LiveSessionPage() {
           </div>
 
           <ul className="list-disc pl-5 space-y-1 text-muted-foreground">
-            <li>Se i simboli non partono: in MT4 → <b>Visualizza → Osservazione del Mercato → Mostra tutto</b>.</li>
+            <li>Se i simboli non partono: MT4 → <b>Visualizza → Osservazione del Mercato → Mostra tutto</b>.</li>
             <li>EA Inputs: <b>SYMBOL_SUFFIX</b> (es. <code>.m</code>), <b>API_BASE</b>, <b>ACCOUNT_ID</b>, <b>EXEC_API_KEY</b>.</li>
             <li><b>Strumenti → Opzioni → Consulenti Esperti</b>: Consenti <b>WebRequest</b> per <code>http://127.0.0.1:8000</code>.</li>
             <li>Pulsante <b>AutoTrading</b> in alto → deve essere <b>verde</b>.</li>
