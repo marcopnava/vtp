@@ -3,10 +3,20 @@
 import Link from "next/link";
 import { Switch } from "@/components/ui/switch";
 import { useToolEnabled } from "@/lib/tool";
+import { useRouter } from "next/navigation";
+import { Button } from "@/components/ui/button";
 
 export default function TopBar() {
   const { enabled, setEnabled } = useToolEnabled();
   const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
+  const router = useRouter();
+
+  async function handleLogout() {
+    try {
+      await fetch("/api/logout", { method: "POST" });
+    } catch {}
+    router.push("/login");
+  }
 
   return (
     <header className="border-b border-border/40 bg-background/60 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -16,7 +26,6 @@ export default function TopBar() {
         <nav className="flex items-center gap-4 text-sm">
           <Link href="/output-ai" className="opacity-90 hover:opacity-100">Output AI</Link>
           <Link href="/data" className="opacity-90 hover:opacity-100">Data</Link>
-          <Link href="/cot-filter" className="opacity-90 hover:opacity-100">COT Filter</Link>
           <Link href="/orders" className="opacity-90 hover:opacity-100">Orders</Link>
           <Link href="/sizing-calculator" className="opacity-90 hover:opacity-100">Calculator</Link>
           <Link href="/live-session" className="opacity-90 hover:opacity-100">Live Session</Link>
@@ -31,6 +40,7 @@ export default function TopBar() {
               {enabled ? "ON" : "OFF"}
             </span>
           </div>
+          <Button size="sm" variant="secondary" onClick={handleLogout}>Logout</Button>
         </div>
       </div>
     </header>
