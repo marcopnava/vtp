@@ -1,34 +1,28 @@
-# /Users/marconava/Desktop/vtp/apps/api/vtp_api/main.py
-
+# apps/api/vtp_api/main.py
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from .routers import api_router
 
-# Routers
-from .sizing import router as sizing_router          # /sizing/calc
-from .routers import router as copy_preview_router   # /copy/preview
+def _cors_origins():
+    raw = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
+    return [x.strip() for x in raw.split(",") if x.strip()]
 
-app = FastAPI(
-    title="VTP API",
-    version="0.1.0",
-    description="Backend API per VTP (copy trading & sizing)",
-)
+app = FastAPI(title="VTP API", version="0.1.0")
 
-# CORS per sviluppo locale (Next.js su localhost:3000)
+# CORS per il frontend Next.js
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Healthcheck semplice
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# Monta i router
-app.include_router(sizing_router, prefix="/sizing", tags=["sizing"])
-app.include_router(copy_preview_router, tags=["copy"])
+# Monta tutti i router (queue obbligatorio, altri se presenti)
+app.include_router(api_router)
