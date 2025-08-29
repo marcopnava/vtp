@@ -1,48 +1,45 @@
 "use client";
 
 import Link from "next/link";
-import { Switch } from "@/components/ui/switch";
-import { useToolEnabled } from "@/lib/tool";
-import { useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { useTool } from "@/lib/tool";
+
+const NAV = [
+  { href: "/data", label: "Data" },
+  { href: "/clients", label: "Clients" },
+  { href: "/output-ai", label: "Output AI" },
+  { href: "/pool", label: "Pool" },
+  { href: "/sizing-calculator", label: "Calculator" },
+  { href: "/live-session", label: "Live Session" },
+];
 
 export default function TopBar() {
-  const { enabled, setEnabled } = useToolEnabled();
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
-  const router = useRouter();
-
-  async function handleLogout() {
-    try {
-      await fetch("/api/logout", { method: "POST" });
-    } catch {}
-    router.push("/login");
-  }
+  const path = usePathname();
+  const { enabled, setEnabled } = useTool();
 
   return (
-    <header className="border-b border-border/40 bg-background/60 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="mx-auto max-w-7xl px-4 py-3 flex items-center gap-6">
-        <Link href="/" className="font-semibold">VTP</Link>
-
-        <nav className="flex items-center gap-4 text-sm">
-          <Link href="/output-ai" className="opacity-90 hover:opacity-100">Output AI</Link>
-          <Link href="/data" className="opacity-90 hover:opacity-100">Data</Link>
-          <Link href="/orders" className="opacity-90 hover:opacity-100">Orders</Link>
-          <Link href="/sizing-calculator" className="opacity-90 hover:opacity-100">Calculator</Link>
-          <Link href="/live-session" className="opacity-90 hover:opacity-100">Live Session</Link>
+    <div className="sticky top-0 z-40 border-b border-border bg-background/80 backdrop-blur">
+      <div className="max-w-7xl mx-auto px-4 h-14 flex items-center gap-3">
+        <Link href="/" className="text-lg font-semibold">vtp</Link>
+        <nav className="flex items-center gap-2">
+          {NAV.map(n => {
+            const active = path?.startsWith(n.href);
+            return (
+              <Link key={n.href} href={n.href} className={`text-sm px-3 py-1.5 rounded-md ${active ? "bg-primary/20 text-primary" : "hover:bg-muted"}`}>
+                {n.label}
+              </Link>
+            );
+          })}
         </nav>
-
-        <div className="ml-auto flex items-center gap-4 text-xs">
-          <div className="opacity-80">API: <code>{apiBase}</code></div>
-          <div className="flex items-center gap-2">
-            <span className="opacity-80">Tool</span>
-            <Switch checked={enabled} onCheckedChange={setEnabled} />
-            <span className={enabled ? "text-green-400" : "text-red-400"}>
-              {enabled ? "ON" : "OFF"}
-            </span>
-          </div>
-          <Button size="sm" variant="secondary" onClick={handleLogout}>Logout</Button>
+        <div className="ml-auto flex items-center gap-2">
+          <label className="text-xs opacity-70">Tool</label>
+          <input type="checkbox" className="scale-125" checked={enabled} onChange={(e)=>setEnabled(e.target.checked)} />
+          <form action="/api/logout" method="post">
+            <Button type="submit" size="sm" variant="secondary">Logout</Button>
+          </form>
         </div>
       </div>
-    </header>
+    </div>
   );
 }

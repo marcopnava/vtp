@@ -1,152 +1,207 @@
-# /Users/marconava/Desktop/vtp/apps/api/vtp_api/routers.py
-import math
-from fastapi import APIRouter
-from .schemas import (
-    CopyPreviewRequest, CopyPreviewResponse, FollowerPreview,
-    SizingRequest, SizingResponse
-)
+# apps/api/vtp_api/routers.py
+from fastapi import APIRouter, HTTPException, Header
+from typing import Dict, Any, Optional, List
+import os
+import time
 
 router = APIRouter()
 
+# ============ SIZING ============
 
-@router.get("/health")
-def health():
-    return {"ok": True}
+@router.post("/sizing/calc")
+def sizing_calc(payload: Dict[str, Any]):
+    """
+    payload atteso:
+    {
+      "risk_mode": "fixed" | "%equity" | "%balance",
+      "risk_value": <float>,
+      "balance": <float>,
+      "equity": <float>,
+      "stop_distance": <float>,  # in prezzo
+      "slippage": <float>,       # in prezzo
+      "instrument": {
+        "symbol": "EURUSD",
+        "tick_size": 0.0001,
+        "tick_value": 10,
+        "min_lot": 0.01,
+        "lot_step": 0.01,
+        "max_lot": 50
+      }
+    }
+    """
+    try:
+      inst = payload["instrument"]
+      tick_size = float(inst["tick_size"])
+      tick_value = float(inst["tick_value"])
+      lot_step  = float(inst["lot_step"])
+      min_lot   = float(inst["min_lot"])
+      max_lot   = float(inst["max_lot"])
+      stop_distance = float(payload.get("stop_distance", 0.0)) + float(payload.get("slippage", 0.0))
 
+      # rischio per ogni 1.00 lot
+      # NB: rischio = (stop_distance / tick_size) * tick_value
+      per_lot_risk = (stop_distance / tick_size) * tick_value
 
-# ---------- /sizing/calc ----------
-@router.post("/sizing/calc", response_model=SizingResponse)
-def sizing_calc(req: SizingRequest) -> SizingResponse:
-    inst = req.instrument
-    warnings = []
+      # quanto rischio voglio mettere in €
+      risk_mode  = str(payload.get("risk_mode","fixed"))
+      risk_value = float(payload.get("risk_value", 0.0))
+      balance    = float(payload.get("balance", 0.0) or 0.0)
+      equity     = float(payload.get("equity", 0.0) or 0.0)
 
-    # budget rischio
-    if req.risk_mode == "fixed":
-        budget = req.risk_value
-    elif req.risk_mode == "percent_balance":
-        if not req.balance or req.balance <= 0:
-            return SizingResponse(suggested_lots=0, rounded_to_step=0, per_lot_risk=0, risk_at_suggested=0, warnings=["balance mancante/<=0"])
-        budget = req.balance * (req.risk_value / 100.0)
-    else:  # percent_equity
-        if not req.equity or req.equity <= 0:
-            return SizingResponse(suggested_lots=0, rounded_to_step=0, per_lot_risk=0, risk_at_suggested=0, warnings=["equity mancante/<=0"])
-        budget = req.equity * (req.risk_value / 100.0)
+      if risk_mode == "%equity":
+          risk_eur = equity * (risk_value/100.0)
+      elif risk_mode == "%balance":
+          risk_eur = balance * (risk_value/100.0)
+      else:
+          risk_eur = risk_value
 
-    per_lot_ticks = (req.stop_distance + max(req.slippage, 0.0)) / inst.tick_size
-    per_lot_risk = per_lot_ticks * inst.tick_value  # EUR per 1 lot
-    if per_lot_risk <= 0:
-        return SizingResponse(suggested_lots=0, rounded_to_step=0, per_lot_risk=0, risk_at_suggested=0, warnings=["per_lot_risk <= 0"])
+      if per_lot_risk <= 0:
+          return {"suggested_lots": 0.0, "rounded_to_step": 0.0, "per_lot_risk": per_lot_risk, "risk_at_suggested": 0.0, "warnings": ["per_lot_risk <= 0"]}
 
-    suggested_lots = budget / per_lot_risk
+      suggested = risk_eur / per_lot_risk
+      # round a step
+      rounded = round(suggested / lot_step) * lot_step
+      # clamp min/max
+      rounded = max(min_lot, min(rounded, max_lot))
 
-    # round down a step
-    step = inst.lot_step if inst.lot_step > 0 else 0.01
-    rounded = math.floor(suggested_lots / step) * step
-    if rounded < inst.min_lot and suggested_lots > 0:
-        warnings.append(f"lot < min_lot, alzato a {inst.min_lot}")
-        rounded = inst.min_lot
-    if inst.max_lot and rounded > inst.max_lot:
-        warnings.append(f"lot > max_lot, limitato a {inst.max_lot}")
-        rounded = inst.max_lot
+      return {
+          "suggested_lots": suggested,
+          "rounded_to_step": round(rounded, 6),
+          "per_lot_risk": per_lot_risk,
+          "risk_at_suggested": per_lot_risk * rounded,
+          "warnings": []
+      }
+    except Exception as e:
+      raise HTTPException(status_code=400, detail=f"sizing_calc error: {e}")
 
-    return SizingResponse(
-        suggested_lots=suggested_lots,
-        rounded_to_step=rounded,
-        per_lot_risk=per_lot_risk,
-        risk_at_suggested=rounded * per_lot_risk,
-        warnings=warnings,
-    )
+# ============ COPY TRADING PREVIEW/EXECUTE ============
 
+def _round_to_step(x: float, step: float) -> float:
+    if step <= 0: return x
+    return round(x/step) * step
 
-# ---------- /copy/preview ----------
-@router.post("/copy/preview", response_model=CopyPreviewResponse)
-def copy_preview(req: CopyPreviewRequest) -> CopyPreviewResponse:
-    inst = req.instrument
-    step = inst.lot_step if inst.lot_step > 0 else 0.01
-    min_lot = inst.min_lot
-    max_lot = inst.max_lot
+def _apply_rule(master_lot: float, base_master: float, follower: Dict[str, Any]) -> float:
+    """
+    Regole supportate:
+    - proportional { base: equity|balance, multiplier }
+    - fixed { lots }
+    - lot_per_10k { base: equity|balance, lots_per_10k }
+    """
+    rule = follower.get("rule", {}) or {}
+    t = rule.get("type")
+    if t == "fixed":
+        return float(rule.get("lots", 0.0))
+    base = str(rule.get("base", "equity"))
+    if t == "proportional":
+        mult = float(rule.get("multiplier", 1.0))
+        fbase = float(follower.get(base, 0.0) or 0.0)
+        return master_lot * (fbase / (base_master or 1.0)) * mult
+    if t == "lot_per_10k":
+        lots_per_10k = float(rule.get("lots_per_10k", 0.0))
+        fbase = float(follower.get(base, 0.0) or 0.0)
+        return (fbase/10000.0) * lots_per_10k
+    return 0.0
 
-    def round_down(v: float) -> float:
-        return max(0.0, math.floor(v / step) * step)
+@router.post("/copy/preview")
+def copy_preview(payload: Dict[str, Any]):
+    try:
+        inst = payload["instrument"]
+        lot_step = float(inst["lot_step"]); min_lot=float(inst["min_lot"]); max_lot=float(inst["max_lot"])
+        master = payload["master_order"]
+        master_lot = float(master["lot"])
+        base_master = float(payload["master_info"].get("equity", 0.0))
+        followers: List[Dict[str, Any]] = payload.get("followers", [])
 
-    def clamp(v: float) -> tuple[float, list[str]]:
-        warns = []
-        out = v
-        if out > 0 and out < min_lot:
-            warns.append(f"lot < min_lot, alzato a {min_lot}")
-            out = min_lot
-        if max_lot is not None and out > max_lot:
-            warns.append(f"lot > max_lot, limitato a {max_lot}")
-            out = max_lot
-        return out, warns
+        previews = []
+        total_raw = 0.0
+        total_rounded = 0.0
+        for f in followers:
+            if not f.get("enabled", True):
+                continue
+            raw = _apply_rule(master_lot, base_master, f)
+            rounded = _round_to_step(raw, lot_step)
+            rounded = max(min_lot, min(rounded, max_lot))
+            previews.append({
+                "follower_id": f.get("id"),
+                "follower_name": f.get("name"),
+                "raw_lot": round(raw, 6),
+                "rounded_lot": round(rounded, 6),
+                "warnings": []
+            })
+            total_raw += raw
+            total_rounded += rounded
 
-    # helper per base value
-    def base_value(x_base: str, bal: float, eq: float) -> float:
-        return eq if x_base == "equity" else bal
+        return {
+            "symbol": master.get("symbol"),
+            "side": master.get("side"),
+            "master_lot": master_lot,
+            "total_followers": len(previews),
+            "total_lots_raw": round(total_raw, 6),
+            "total_lots_rounded": round(total_rounded, 6),
+            "previews": previews
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"copy_preview error: {e}")
 
-    previews: list[FollowerPreview] = []
-    total_raw = 0.0
-    total_rounded = 0.0
-    total_followers = 0
+@router.post("/copy/execute")
+def copy_execute(payload: Dict[str, Any]):
+    """
+    DRY_RUN: genera un execution_plan identico al preview con metadata.
+    payload identico a /copy/preview. Aggiungi facoltativo: {"dry_run": true}
+    """
+    try:
+        dry_run = bool(payload.get("dry_run", True))
+        preview = copy_preview(payload)  # riuso la logica
+        plan = {
+            "ts": int(time.time()),
+            "symbol": preview["symbol"],
+            "side": preview["side"],
+            "master_lot": preview["master_lot"],
+            "total_lots": preview["total_lots_rounded"],
+            "entries": [
+                {
+                    "follower_id": p["follower_id"],
+                    "follower_name": p["follower_name"],
+                    "lot": p["rounded_lot"],
+                    "status": "planned"
+                }
+                for p in preview["previews"]
+            ]
+        }
+        # live non implementata: torniamo comunque DRY_RUN
+        return {
+            "mode": "DRY_RUN" if dry_run else "LIVE_NOT_IMPLEMENTED",
+            "execution_plan": plan
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"copy_execute error: {e}")
 
-    master_bal = req.master_info.balance
-    master_eq = req.master_info.equity
+# ============ PRICES ============
 
-    for f in req.followers:
-        warnings: list[str] = []
-        raw = 0.0
-        if not f.enabled:
-            previews.append(FollowerPreview(
-                follower_id=f.id, follower_name=f.name, raw_lot=0.0, rounded_lot=0.0,
-                warnings=["disabled"]
-            ))
-            continue
+PRICES: Dict[str, Dict[str, Any]] = {}  # memoria volatile
 
-        r = f.rule
-        if r.type == "proportional":
-            follower_base = base_value(r.base, f.balance, f.equity)
-            master_base = base_value(r.base, master_bal, master_eq)
-            if master_base <= 0:
-                warnings.append("master base <= 0")
-                raw = 0.0
-            else:
-                raw = req.master_order.lot * (follower_base / master_base) * r.multiplier
-        elif r.type == "fixed":
-            raw = max(0.0, r.lots)
-        else:  # lot_per_10k
-            b = base_value(r.base, f.balance, f.equity)
-            unit = r.unit if r.unit > 0 else 10_000.0
-            raw = (b / unit) * r.lots_per_unit
+def _require_api_key(x_api_key: Optional[str]):
+    expected = os.environ.get("PRICE_API_KEY", "dev")
+    if not x_api_key or x_api_key != expected:
+        raise HTTPException(status_code=401, detail="invalid api key")
 
-        if raw < 0:
-            warnings.append("lot negativo corretto a 0")
-            raw = 0.0
+@router.post("/prices/ingest")
+def prices_ingest(body: Dict[str, Any], x_api_key: Optional[str] = Header(None, convert_underscores=False)):
+    """
+    headers: X-API-KEY: <token>
+    body: { "symbol":"EURUSD", "bid":1.12345, "ask":1.12358, "ts": 1693242343 }
+    """
+    _require_api_key(x_api_key)
+    sym = str(body.get("symbol","")).upper()
+    if not sym: raise HTTPException(status_code=400, detail="symbol required")
+    bid = float(body.get("bid", 0.0)); ask = float(body.get("ask", 0.0))
+    ts  = int(body.get("ts", time.time()))
+    PRICES[sym] = {"symbol": sym, "bid": bid, "ask": ask, "ts": ts}
+    return {"ok": True, "stored": PRICES[sym]}
 
-        rounded = round_down(raw)
-        if rounded != raw:
-            warnings.append(f"rounded down by step {step}")
-
-        rounded, limit_warns = clamp(rounded)
-        warnings.extend(limit_warns)
-
-        total_followers += 1
-        total_raw += raw
-        total_rounded += rounded
-
-        previews.append(FollowerPreview(
-            follower_id=f.id,
-            follower_name=f.name,
-            raw_lot=round(raw, 6),
-            rounded_lot=round(rounded, 6),
-            warnings=warnings
-        ))
-
-    return CopyPreviewResponse(
-        symbol=req.master_order.symbol,
-        side=req.master_order.side,
-        master_lot=req.master_order.lot,
-        total_followers=total_followers,
-        total_lots_raw=round(total_raw, 6),
-        total_lots_rounded=round(total_rounded, 6),
-        previews=previews
-    )
+@router.get("/prices/latest")
+def prices_latest(symbol: Optional[str] = None):
+    if symbol:
+        s = symbol.upper()
+        return PRICES.get(s, {"symbol": s, "bid": None, "ask": None, "ts": None})
+    return {"items": list(PRICES.values())}
