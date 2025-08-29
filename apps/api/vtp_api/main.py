@@ -10,7 +10,6 @@ def _cors_origins():
 
 app = FastAPI(title="VTP API", version="0.1.0")
 
-# CORS per il frontend Next.js
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
@@ -19,10 +18,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Healthcheck semplice
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# Monta tutti i router (queue obbligatorio, altri se presenti)
 app.include_router(api_router)
