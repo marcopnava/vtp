@@ -2,7 +2,7 @@
 from typing import List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
-
+# ora supportiamo anche "close"
 Side = Literal["buy", "sell", "close"]
 
 
@@ -10,7 +10,8 @@ class TradeItemIn(BaseModel):
     account_id: str = Field(..., min_length=1, description="Deve combaciare con ACCOUNT_ID dell'EA")
     symbol: str = Field(..., min_length=1, description="Simbolo canonical lato piattaforma (es. EURUSD, US100, XAUUSD)")
     side: Side = Field(..., description='"buy" | "sell" | "close"')
-    lot: float = Field(ge=0, description="Lotti. Per side=close viene ignorato (coerzionato a 0).")
+    # per close permettiamo lot = 0 (ignorato)
+    lot: float = Field(ge=0, description="Lotti. Per side=close viene ignorato (forzato a 0).")
     sl: float = Field(default=0, ge=0, description="Prezzo SL assoluto (0 = nessuno)")
     tp: float = Field(default=0, ge=0, description="Prezzo TP assoluto (0 = nessuno)")
     idempotency_key: Optional[str] = Field(
@@ -20,10 +21,10 @@ class TradeItemIn(BaseModel):
 
     @model_validator(mode="after")
     def normalize_for_close(self):
-        # Normalizza simboli a uppercase (il mapping verso suffissi broker lo fa l'EA)
+        # normalizza simbolo in maiuscolo (il suffisso broker lo applica l'EA)
         self.symbol = (self.symbol or "").strip().upper()
 
-        # Per side=close, forziamo lot/sl/tp a 0 così il backend/EA non li usa.
+        # se side=close, azzera lot/sl/tp (non servono)
         if self.side == "close":
             self.lot = 0.0
             self.sl = 0.0
